@@ -229,6 +229,98 @@ def cleanup_worktree(repo_path: str, worktree_path: str) -> None:
         pass
 
 
+# ── Change Summary ────────────────────────────────────────────────────────
+
+def _detect_base_ref(worktree_path: str) -> str:
+    """Detect the base remote ref for the worktree branch."""
+    for ref in [f"origin/{TARGET_BRANCH}", "origin/main", "origin/master"]:
+        try:
+            shell(f"git rev-parse --verify {ref}", cwd=worktree_path)
+            return ref
+        except Exception:
+            continue
+    return "HEAD~2"
+
+
+def generate_change_summary(worktree_path: str) -> dict[str, Any]:
+    """Generate a summary of changes made in the worktree (commits, diff stats, env changes)."""
+    base_ref = _detect_base_ref(worktree_path)
+    summary: dict[str, Any] = {
+        "commit_messages": [],
+        "diff_stat": "",
+        "files_changed": [],
+        "env_changes": [],
+    }
+
+    try:
+        raw = shell(f'git log --format="%s" {base_ref}..HEAD', cwd=worktree_path)
+        summary["commit_messages"] = [m for m in raw.split("\n") if m.strip()]
+    except Exception:
+        pass
+
+    try:
+        summary["diff_stat"] = shell(f"git diff {base_ref}..HEAD --stat", cwd=worktree_path)
+    except Exception:
+        pass
+
+    try:
+        raw = shell(f"git diff {base_ref}..HEAD --name-only", cwd=worktree_path)
+        summary["files_changed"] = [f for f in raw.split("\n") if f.strip()]
+    except Exception:
+        pass
+
+    summary["env_changes"] = _detect_env_changes(worktree_path, base_ref, summary["files_changed"])
+    return summary
+
+
+def _detect_env_changes(
+    worktree_path: str, base_ref: str, files_changed: list[str]
+) -> list[str]:
+    """Detect environment-related changes (env files, new env variable references)."""
+    env_changes: list[str] = []
+
+    # Check for env-related file modifications
+    env_files = [
+        f for f in files_changed
+        if os.path.basename(f).lower().startswith(".env")
+        or "docker-compose" in os.path.basename(f).lower()
+    ]
+    if env_files:
+        env_changes.append(
+            f"**Modified env files:** {', '.join(f'`{f}`' for f in env_files)}"
+        )
+
+    # Scan diff for new env variable references
+    try:
+        diff = shell(f"git diff {base_ref}..HEAD", cwd=worktree_path, timeout=30)
+        added_vars: set[str] = set()
+        for line in diff.split("\n"):
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            # Python: os.environ["KEY"], os.environ.get("KEY"), os.getenv("KEY")
+            for m in re.finditer(
+                r'os\.(?:environ(?:\[|\.get\s*\()|getenv\s*\()\s*["\']([A-Z_][A-Z0-9_]*)["\']',
+                line,
+            ):
+                added_vars.add(m.group(1))
+            # Node.js: process.env.KEY
+            for m in re.finditer(r'process\.env\.([A-Z_][A-Z0-9_]*)', line):
+                added_vars.add(m.group(1))
+            # .env file lines: KEY=value
+            m_env = re.match(r'^\+([A-Z][A-Z0-9_]{2,})=', line)
+            if m_env:
+                added_vars.add(m_env.group(1))
+
+        if added_vars:
+            env_changes.append(
+                f"**New/modified env variables:** {', '.join(f'`{v}`' for v in sorted(added_vars))}"
+            )
+    except Exception:
+        pass
+
+    return env_changes
+
+
 # ── Claude Code ──────────────────────────────────────────────────────────────
 
 def _run_claude(identifier: str, prompt_file: str, log_file: str, worktree_path: str, phase: str) -> bool:
@@ -339,7 +431,8 @@ def run_claude_code(
 # ── PR Creation ──────────────────────────────────────────────────────────────
 
 def push_and_create_pr(
-    worktree_path: str, repo_name: str, branch_name: str, issue: dict[str, Any]
+    worktree_path: str, repo_name: str, branch_name: str, issue: dict[str, Any],
+    change_summary: dict[str, Any] | None = None,
 ) -> str | None:
     identifier = issue["identifier"]
 
@@ -368,12 +461,33 @@ def push_and_create_pr(
     description = issue.get("description") or "N/A"
     url = issue["url"]
 
-    pr_body = (
-        f"## {identifier}: {title}\n\n"
-        f"### Linear Ticket\n{url}\n\n"
-        f"### Description\n{description}\n\n"
-        f"---\n*Automated by Linear-Claude Automation*"
-    )
+    # Build PR body with summary
+    pr_parts = [
+        f"## {identifier}: {title}\n",
+        f"### Linear Ticket\n{url}\n",
+        f"### Description\n{description}\n",
+    ]
+
+    if change_summary:
+        if change_summary.get("commit_messages"):
+            pr_parts.append("### Changes Summary")
+            for msg in change_summary["commit_messages"]:
+                pr_parts.append(f"- {msg}")
+            pr_parts.append("")
+
+        if change_summary.get("diff_stat"):
+            pr_parts.append("### Files Changed")
+            pr_parts.append(f"```\n{change_summary['diff_stat']}\n```\n")
+
+        if change_summary.get("env_changes"):
+            pr_parts.append("### \u26a0\ufe0f Environment Changes")
+            for change in change_summary["env_changes"]:
+                pr_parts.append(change)
+            pr_parts.append("")
+
+    pr_parts.append("---\n*Automated by NightShift*")
+    pr_body = "\n".join(pr_parts)
+
     pr_body_file = os.path.join(LOGS_DIR, f"pr_body_{identifier}.txt")
     with open(pr_body_file, "w") as f:
         f.write(pr_body)
@@ -442,6 +556,7 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
     try:
         transition_issue(issue, "started", state_name="In Progress")
         pr_urls: list[str] = []
+        repo_summaries: list[tuple[str, dict[str, Any]]] = []
 
         for entry in repo_entries:
             log(f"  [{identifier}] Working on repo: {entry.name}")
@@ -457,9 +572,13 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
                 success = run_claude_code(worktree_path, issue, entry.name, team_key)
 
                 if success:
-                    pr_url = push_and_create_pr(worktree_path, entry.name, branch_name, issue)
+                    change_summary = generate_change_summary(worktree_path)
+                    pr_url = push_and_create_pr(
+                        worktree_path, entry.name, branch_name, issue, change_summary,
+                    )
                     if pr_url:
                         pr_urls.append(pr_url)
+                        repo_summaries.append((entry.name, change_summary))
 
                 cleanup_worktree(repo_path, worktree_path)
             except Exception as err:
@@ -467,11 +586,36 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
 
         if pr_urls:
             transition_issue(issue, "started", state_name="Code Review")
-            pr_list = "\n".join(f"- {url}" for url in pr_urls)
-            comment_on_issue(
-                issue["id"],
-                f"🤖 **Claude Code** created {len(pr_urls)} PR(s):\n\n{pr_list}\n\nPlease review.",
-            )
+
+            # Build comment with summary and env changes
+            comment_parts = [
+                f"\U0001f916 **NightShift** created {len(pr_urls)} PR(s):\n",
+                "\n".join(f"- {url}" for url in pr_urls),
+            ]
+
+            # Add changes summary per repo
+            for repo_name, summary in repo_summaries:
+                if summary.get("commit_messages"):
+                    header = f"### Changes Summary" if len(repo_summaries) == 1 else f"### Changes Summary ({repo_name})"
+                    comment_parts.append(f"\n{header}")
+                    for msg in summary["commit_messages"]:
+                        comment_parts.append(f"- {msg}")
+
+                if summary.get("diff_stat"):
+                    comment_parts.append(f"\n```\n{summary['diff_stat']}\n```")
+
+            # Add env changes if any
+            all_env_changes: list[str] = []
+            for _, summary in repo_summaries:
+                all_env_changes.extend(summary.get("env_changes", []))
+            if all_env_changes:
+                comment_parts.append("\n### \u26a0\ufe0f Environment Changes")
+                for change in all_env_changes:
+                    comment_parts.append(change)
+
+            comment_parts.append("\nPlease review.")
+            comment_on_issue(issue["id"], "\n".join(comment_parts))
+
             log(f"Done: {identifier} -> {', '.join(pr_urls)}")
             with _processed_lock:
                 processed_issues.add(issue["id"])
