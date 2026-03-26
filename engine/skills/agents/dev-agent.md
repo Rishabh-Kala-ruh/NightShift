@@ -96,13 +96,31 @@ If existing tests break, fix your implementation — do NOT modify existing test
 
 ```bash
 git add -A
-git commit -m "fix(TICKET-ID): SHORT-SUMMARY"
+git commit -m "TICKET-ID: ticket title
+
+<2-3 sentence summary of what was changed and why>
+
+Resolves: TICKET-ID"
 ```
 
-The commit message should describe WHAT was changed, not repeat the ticket title.
+The commit message body should describe WHAT was changed, not repeat the ticket title.
 Examples:
-- `fix(RUH-384): increase image generation timeout to 240s and add retry logic`
-- `feat(RUH-383): add video input support with frame extraction fallback`
+```
+RUH-384: Fix image generation timeout
+
+Increased image generation timeout from 120s to 240s and added retry
+logic with exponential backoff for transient API failures.
+
+Resolves: RUH-384
+```
+```
+RUH-383: Add video input support
+
+Added video input handling with frame extraction fallback for models
+that don't support native video. Extracts key frames at 1fps.
+
+Resolves: RUH-383
+```
 
 ## Critical Rules
 

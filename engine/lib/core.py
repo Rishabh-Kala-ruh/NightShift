@@ -26,6 +26,7 @@ from lib.config import (
 )
 from lib.linear_client import LinearClient
 from skills.developer_skill import DeveloperSkill, DeveloperResult
+from skills.ticket_enricher import parse_acceptance_criteria
 
 
 # ── Types ────────────────────────────────────────────────────────────────────
@@ -461,29 +462,44 @@ def push_and_create_pr(
     description = issue.get("description") or "N/A"
     url = issue["url"]
 
-    # Build PR body with summary
-    pr_parts = [
-        f"## {identifier}: {title}\n",
-        f"### Linear Ticket\n{url}\n",
-        f"### Description\n{description}\n",
-    ]
+    # Build PR body
+    pr_parts = [f"## Summary"]
 
-    if change_summary:
-        if change_summary.get("commit_messages"):
-            pr_parts.append("### Changes Summary")
-            for msg in change_summary["commit_messages"]:
-                pr_parts.append(f"- {msg}")
-            pr_parts.append("")
+    # Summary from commit messages
+    if change_summary and change_summary.get("commit_messages"):
+        for msg in change_summary["commit_messages"]:
+            pr_parts.append(f"- {msg}")
+    else:
+        pr_parts.append(f"{identifier}: {title}")
+    pr_parts.append("")
+
+    # Ticket link
+    pr_parts.append(f"## Ticket\n[{identifier}]({url})\n")
+
+    # Changes Made (files changed)
+    if change_summary and change_summary.get("files_changed"):
+        pr_parts.append("## Changes Made")
+        for f in change_summary["files_changed"]:
+            pr_parts.append(f"- `{f}`")
+        pr_parts.append("")
 
         if change_summary.get("diff_stat"):
-            pr_parts.append("### Files Changed")
             pr_parts.append(f"```\n{change_summary['diff_stat']}\n```\n")
 
-        if change_summary.get("env_changes"):
-            pr_parts.append("### \u26a0\ufe0f Environment Changes")
-            for change in change_summary["env_changes"]:
-                pr_parts.append(change)
-            pr_parts.append("")
+    # Acceptance Criteria (parsed from ticket description)
+    ac = parse_acceptance_criteria(description)
+    if ac:
+        pr_parts.append("## Acceptance Criteria")
+        for criterion in ac:
+            pr_parts.append(f"- [ ] {criterion}")
+        pr_parts.append("")
+
+    # Environment Changes
+    if change_summary and change_summary.get("env_changes"):
+        pr_parts.append("## \u26a0\ufe0f Environment Changes")
+        for change in change_summary["env_changes"]:
+            pr_parts.append(change)
+        pr_parts.append("")
 
     pr_parts.append("---\n*Automated by NightShift*")
     pr_body = "\n".join(pr_parts)
@@ -492,17 +508,23 @@ def push_and_create_pr(
     with open(pr_body_file, "w") as f:
         f.write(pr_body)
 
+    pr_title = f"{identifier}: {title}"
+
+    # Create PR via gh CLI, fall back to manual URL if gh fails
     try:
         pr_url = shell(
             f'gh pr create --repo "{gh_repo}" --base "{TARGET_BRANCH}" '
-            f'--head "{branch_name}" --title "fix({identifier}): {title}" '
+            f'--head "{branch_name}" --title "{pr_title}" '
             f'--body-file "{pr_body_file}"',
             cwd=worktree_path,
         )
         return pr_url
     except Exception as err:
-        log(f"PR creation failed for {identifier} on {gh_repo}: {err}")
-        return None
+        log(f"gh pr create failed for {identifier} on {gh_repo}: {err}")
+        # Fallback: construct manual PR URL
+        fallback_url = f"https://github.com/{gh_repo}/compare/{TARGET_BRANCH}...{branch_name}?expand=1"
+        log(f"Fallback PR URL: {fallback_url}")
+        return fallback_url
 
 
 # ── Linear Updates ───────────────────────────────────────────────────────────
@@ -615,19 +637,34 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
         if pr_urls:
             transition_issue(issue, "started", state_name="Code Review")
 
-            # Build comment with summary and env changes
+            # Build ticket comment
+            branch_name = f"claude/{identifier.lower()}"
             comment_parts = [
-                f"\U0001f916 **NightShift** created {len(pr_urls)} PR(s):\n",
-                "\n".join(f"- {url}" for url in pr_urls),
+                "Development complete. Branch and PR created automatically.\n",
             ]
+
+            # Branch and PR info
+            for i, url in enumerate(pr_urls):
+                repo_label = repo_summaries[i][0] if i < len(repo_summaries) else ""
+                if len(pr_urls) > 1 and repo_label:
+                    comment_parts.append(f"**Branch ({repo_label}):** `{branch_name}`")
+                    comment_parts.append(f"**PR ({repo_label}):** {url}")
+                else:
+                    comment_parts.append(f"**Branch:** `{branch_name}`")
+                    comment_parts.append(f"**PR:** {url}")
 
             # Add changes summary per repo
             for repo_name, summary in repo_summaries:
                 if summary.get("commit_messages"):
-                    header = f"### Changes Summary" if len(repo_summaries) == 1 else f"### Changes Summary ({repo_name})"
+                    header = "### Changes Summary" if len(repo_summaries) == 1 else f"### Changes Summary ({repo_name})"
                     comment_parts.append(f"\n{header}")
                     for msg in summary["commit_messages"]:
                         comment_parts.append(f"- {msg}")
+
+                if summary.get("files_changed"):
+                    comment_parts.append("\n**Files changed:**")
+                    for f in summary["files_changed"]:
+                        comment_parts.append(f"- `{f}`")
 
                 if summary.get("diff_stat"):
                     comment_parts.append(f"\n```\n{summary['diff_stat']}\n```")
@@ -641,7 +678,7 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
                 for change in all_env_changes:
                     comment_parts.append(change)
 
-            comment_parts.append("\nPlease review.")
+            comment_parts.append("\nChanges were committed and pushed. The ticket has been moved to Code Review.")
             comment_on_issue(issue["id"], "\n".join(comment_parts))
 
             log(f"Done: {identifier} -> {', '.join(pr_urls)}")
