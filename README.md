@@ -1,280 +1,485 @@
-# NightShift 🌙
+# NightShift
 
-> Autonomous development agent — picks up tickets, writes tests, implements fixes, ships PRs while you sleep.
+> Autonomous development agent that picks up tickets, writes tests, implements fixes, and ships PRs — while you sleep.
 
-An OpenClaw agent that processes Linear tickets end-to-end using Test-Driven Development with Sentinel Guardian test methodology.
+NightShift processes Linear tickets end-to-end using Test-Driven Development with Sentinel Guardian test methodology. It runs inside Docker, polls Linear for eligible tickets, and produces ready-to-review pull requests.
 
 ---
 
-## End-to-End Flow
-
-### The Big Picture
+## How It Works
 
 ```
- Linear Board                  Pathfinder (upstream)               NightShift (this agent)
- ───────────                   ────────────────────               ──────────────────────────
- Ticket created        →       Analyzes ticket                    
- in "Todo" / "Backlog"         Writes RCA (bug) or TRD (feature)  
-                               Adds comment with analysis          
-                               Moves to "Ready for Development"  → Picks up ticket
-                                                                   Filters repos (LLM)
-                                                                   Writes tests (Sentinel)
-                                                                   Implements fix (TDD)
-                                                                   Pushes branch + creates PR
-                                                                   Moves to "Code Review"
+  Linear Board               Pathfinder (upstream)            NightShift
+  ────────────               ────────────────────             ──────────
+  Ticket created      --->   Analyzes ticket
+  in "Todo"                  Writes RCA (bug) or
+                             TRD (feature)
+                             Posts comment with analysis
+                             Moves to "Ready for Dev"  --->  Picks up ticket
+                                                             Filters repos (LLM)
+                                                             Writes tests (Sentinel)
+                                                             Implements fix (TDD)
+                                                             Creates PR with summary
+                                                             Moves to "Code Review"
 ```
 
-### Detailed Pipeline (6 Phases)
+---
 
-#### Phase 1: COLLECT — Find eligible tickets
+## Pipeline (6 Phases)
+
+### Phase 1: COLLECT
 
 ```
 Linear API
-  │
-  ├─ Fetch all tickets in "Ready for Development" status
-  ├─ Exclude already-processed tickets (tracked in processed_issues.json)
-  ├─ Exclude tickets with "claude-processing" or "claude-done" labels
-  └─ Sort by priority: Urgent → High → Medium → Low → None
+  |
+  |-- Authenticate as bot user (get viewer ID)
+  |-- Scan all teams the API key has access to
+  |-- Fetch tickets in "Ready for Development" state
+  |     (fallback: unstarted/started types)
+  |-- Exclude already-processed (tracked in processed_issues.json)
+  |-- Exclude tickets labeled "claude-processing" or "claude-done"
+  '-- Sort by priority: Urgent > High > Medium > Low > None
 ```
 
-NightShift authenticates with the Linear API, scans every team the API key has access to, and collects eligible tickets. Priority sorting ensures the most critical work happens first.
+Priority mapping: `{1: Urgent, 2: High, 3: Medium, 4: Low, 0: None}`
 
-#### Phase 2: PREPARE — Parse analysis & prepare repos
+### Phase 2: PREPARE
 
 ```
 For each ticket:
-  │
-  ├─ Fetch all comments from Linear
-  ├─ Find Pathfinder comment (contains RCA or TRD)
-  ├─ Parse Pathfinder analysis:
-  │     ├─ Classification (BUG / FEATURE / TASK)
-  │     ├─ Complexity (S / M / L / XL)
-  │     ├─ Repos affected (with notes: "Primary Changes", "No Changes Needed", etc.)
-  │     ├─ Code changes table (file, function, change type, description)
-  │     └─ File hints (paths mentioned in analysis)
-  │
-  ├─ 🆕 LLM Repo Filter (repo_filter.py)
-  │     ├─ Sends full Pathfinder text + repo list to Claude CLI
-  │     ├─ Asks: "Which repos actually need code changes?"
-  │     ├─ Filters out repos that need no modifications
-  │     ├─ Handles any phrasing (not string-matching)
-  │     ├─ 30s timeout, falls back to all repos on failure
-  │     └─ Logs which repos were filtered out and why
-  │
-  ├─ Enrich ticket context:
-  │     ├─ Sub-issues and their statuses
-  │     ├─ Related issues (blocks, blocked by, duplicates)
-  │     ├─ Acceptance criteria extraction
-  │     └─ Attachment URLs
-  │
-  └─ Clone/update filtered repos in parallel (up to 4 at once)
-        ├─ Auto-clone from git@github.com:{org}/{repo}.git if not cached
-        ├─ Pull latest from target branch (dev/main/master)
-        └─ Create isolated git worktree: .worktrees/claude/{ticket-id}
+  |
+  |-- Fetch comments from Linear
+  |-- Find Pathfinder comment (marker: "Pathfinder Analysis")
+  |-- Parse Pathfinder analysis:
+  |     |-- Classification: BUG / FEATURE / TASK
+  |     |-- Complexity: S / M / L / XL
+  |     |-- Repos affected (with notes: "Primary Changes", "No Changes Needed")
+  |     |-- Code changes table (repo, file, function, change type, description)
+  |     '-- File hints (paths mentioned in analysis)
+  |
+  |-- LLM Repo Filter (repo_filter.py)
+  |     |-- Sends full Pathfinder text + repo list to Claude CLI
+  |     |-- Asks: "Which repos actually need code changes?"
+  |     |-- Removes repos that need no modifications
+  |     |-- Semantic understanding (not string matching)
+  |     |-- 30s timeout, max-turns 2, falls back to full list on failure
+  |     '-- Skipped if only 1 repo
+  |
+  |-- Enrich ticket context (7 parallel API calls):
+  |     |-- Issue state + labels
+  |     |-- Discussion thread (up to 50 comments)
+  |     |-- Sub-issues and statuses
+  |     |-- Parent ticket (for sub-tasks)
+  |     |-- Related issues (blocks, blocked-by, duplicates)
+  |     |-- Attachments
+  |     |-- Acceptance criteria (parsed from description)
+  |     '-- File hints (extracted from description + comments)
+  |
+  '-- Clone/update all unique repos in parallel (up to 4 workers)
+        |-- Check REPO_MAP first, then auto-clone from GitHub
+        |-- Pull latest from TARGET_BRANCH (dev/main/master)
+        '-- Create isolated git worktree: .worktrees/claude/{ticket-id}
 ```
 
-**Why filter repos?** Pathfinder lists all repos it analyzed, including ones that explicitly need no changes (e.g., "communication-service — No Changes Needed ✅"). Without filtering, NightShift would waste two Claude Code sessions (Test Agent + Dev Agent) per unnecessary repo, creating junk test-only PRs.
-
-#### Phase 3: SCOPE — Resolve ticket type and context
+### Phase 3: SCOPE
 
 ```
-Ticket Scope Resolution:
-  │
-  ├─ "normal" — standalone ticket, no children
-  │     └─ Process normally
-  │
-  ├─ "parent_with_subtasks" — has child issues
-  │     ├─ Identify sub-tasks assigned to OTHER developers
-  │     ├─ Exclude their scope from implementation
-  │     └─ Only implement unassigned scope + own sub-tasks
-  │
-  └─ "subtask" — is a child of a parent ticket
-        ├─ Fetch parent ticket for context
-        └─ Only implement THIS sub-task's scope (not the parent)
+Ticket Scope Resolution (via DeveloperSkill):
+  |
+  |-- "normal" --- standalone ticket, no children
+  |     '-- Process normally
+  |
+  |-- "parent_with_subtasks" --- has child issues
+  |     |-- Identify sub-tasks assigned to OTHER developers
+  |     |-- Exclude their scope from implementation
+  |     '-- Only implement unassigned scope + own sub-tasks
+  |
+  '-- "subtask" --- is a child of a parent ticket
+        |-- Fetch parent ticket for context
+        '-- Only implement THIS sub-task's scope
 ```
 
-Scope resolution prevents NightShift from stepping on other developers' work when processing tickets with sub-tasks.
+Repo resolution priority: Pathfinder repos > `repo:` labels > GitHub URLs in description > parent ticket repos > project name > team key fallback.
 
-#### Phase 4: TEST — Write tests first (Test Agent)
-
-```
-For each filtered repo:
-  │
-  ├─ Detect stack: backend / frontend / fullstack
-  │     (inspects package.json, requirements.txt, go.mod, etc.)
-  │
-  ├─ Load Sentinel Guardian test skills for detected stack:
-  │     ├─ Unit tests (pytest / jest / go test)
-  │     ├─ Integration tests
-  │     ├─ API contract tests
-  │     ├─ Security tests
-  │     └─ ... (13 skills total)
-  │
-  ├─ Build test prompt:
-  │     ├─ Ticket description + acceptance criteria
-  │     ├─ Pathfinder analysis (RCA/TRD)
-  │     ├─ File hints (where to look)
-  │     ├─ Existing test patterns in the repo
-  │     └─ All relevant Sentinel skill instructions (concatenated)
-  │
-  └─ Spawn Claude Code session (Test Agent):
-        ├─ Reads the codebase
-        ├─ Writes test cases covering:
-        │     ├─ Main fix/feature behavior
-        │     ├─ Each acceptance criterion
-        │     └─ Edge cases from discussion comments
-        ├─ Commits: test(RUH-XXX): add tests for <summary>
-        └─ Max 30 turns, 15-minute timeout
-```
-
-**Key rule:** Tests are written BEFORE implementation. They define the contract. The Dev Agent must make them pass without modifying test files.
-
-#### Phase 5: IMPLEMENT — Make tests pass (Dev Agent)
+### Phase 4: TEST (Test Agent)
 
 ```
-For each filtered repo (same worktree as Test Agent):
-  │
-  ├─ Build implementation prompt:
-  │     ├─ Pathfinder RCA/TRD as primary source of truth
-  │     ├─ 🆕 Code changes scoped to current repo only
-  │     │     ├─ "Code Changes for This Repo" — what to modify
-  │     │     └─ "Code Changes in Other Repos" — read-only context
-  │     ├─ Scope restrictions (sub-task exclusions)
-  │     ├─ Discussion thread (clarifications, decisions)
-  │     └─ Developer skill instructions (TDD workflow)
-  │
-  └─ Spawn Claude Code session (Dev Agent):
-        ├─ Reads test files committed by Test Agent
-        ├─ Runs tests — confirms they FAIL (red)
-        ├─ Implements the fix/feature following Pathfinder's code changes table
-        ├─ Runs tests — iterates until they PASS (green)
-        ├─ Runs full test suite — checks for regressions
-        ├─ Commits: fix(RUH-XXX): <what was changed>
-        └─ NEVER edits test files
+For each repo (parallel, up to MAX_CONCURRENT_REPOS workers):
+  |
+  |-- Detect stack from project files:
+  |     Backend:   requirements.txt, pyproject.toml, go.mod, Cargo.toml, pom.xml, Gemfile
+  |     Frontend:  next.config.*, vite.config.*, angular.json, svelte.config.js
+  |     Fullstack: both signals present
+  |     (also checks package.json deps: react, next, vue, angular, svelte, nuxt)
+  |
+  |-- Load Sentinel Guardian skills for detected stack:
+  |     Backend (9):   test-setup, unit-tests, integration-tests, contract-tests,
+  |                    security-tests, resilience-tests, smoke-tests, e2e-api-tests, test-review
+  |     Frontend (4):  test-setup, unit-tests, e2e-browser-tests, test-review
+  |     Fullstack (10): all backend + e2e-browser-tests
+  |
+  |-- Build single test prompt (all skills concatenated):
+  |     |-- test-agent.md definition
+  |     |-- Ticket context (description, criteria, Pathfinder, comments, hints)
+  |     |-- All applicable Sentinel skill instructions
+  |     '-- Critical rules (tests only, 1 per criterion, follow patterns)
+  |
+  '-- Spawn Claude Code session:
+        |-- Reads the codebase and existing test patterns
+        |-- Writes tests covering: main behavior, each AC, edge cases
+        |-- Commits: test(TICKET-ID): add tests for <title>
+        '-- Max 30 turns, 15-minute timeout
 ```
 
-**Critical rules:**
-- Tests are the contract — if code doesn't pass, fix the code, not the tests
-- Follow Pathfinder's code changes table precisely
-- Minimal changes — don't refactor unrelated code
-- If unable to fix, creates `CLAUDE_UNABLE.md` explaining why
+Tests are written BEFORE implementation. They define the contract. The Dev Agent must make them pass without modifying test files.
 
-#### Phase 6: SHIP — Push, PR, and transition
+### Phase 5: IMPLEMENT (Dev Agent)
+
+```
+Same worktree as Test Agent:
+  |
+  |-- Build implementation prompt:
+  |     |-- dev-agent.md definition
+  |     |-- Pathfinder RCA/TRD as primary source of truth
+  |     |-- Code changes scoped to current repo only:
+  |     |     |-- "Code Changes for This Repo" --- what to modify
+  |     |     '-- "Code Changes in Other Repos" --- read-only context
+  |     |-- Scope restrictions (sub-task exclusions if applicable)
+  |     |-- Acceptance criteria + discussion thread
+  |     '-- Developer skill instructions (TDD workflow from SKILL.md)
+  |
+  '-- Spawn Claude Code session:
+        |-- Reads test files committed by Test Agent
+        |-- Runs tests --- confirms they FAIL (red)
+        |-- Implements fix following Pathfinder code changes table
+        |-- Runs tests --- iterates until they PASS (green)
+        |-- Runs full test suite --- checks for regressions
+        |-- Commits:
+        |     TICKET-ID: <ticket title>
+        |
+        |     <2-3 sentence summary of changes>
+        |
+        |     Resolves: TICKET-ID
+        '-- If stuck, creates CLAUDE_UNABLE.md explaining why
+```
+
+Critical: Dev Agent NEVER edits test files. Tests are the contract.
+
+### Phase 6: SHIP
 
 ```
 For each repo with commits:
-  │
-  ├─ Verify changes exist (git diff)
-  ├─ Check for CLAUDE_UNABLE.md (skip if present)
-  ├─ Push branch: claude/{ticket-id} → origin
-  ├─ Create GitHub PR:
-  │     ├─ Base: dev (configurable via TARGET_BRANCH)
-  │     ├─ Title: fix(RUH-XXX): <ticket title>
-  │     └─ Body: ticket description + Linear URL
-  └─ Clean up worktree
-  
-After all repos:
-  │
-  ├─ Comment on Linear ticket:
-  │     "🤖 Claude Code created N PR(s): [links]"
-  ├─ Transition ticket to "Code Review"
-  └─ Mark as processed (won't pick up again)
-```
+  |
+  |-- Generate change summary:
+  |     |-- Commit messages (git log base..HEAD)
+  |     |-- Diff stats (files changed, insertions, deletions)
+  |     |-- Environment change detection:
+  |           |-- Modified .env* or docker-compose* files
+  |           |-- New env var references: os.environ, os.getenv (Python)
+  |           |-- New env var references: process.env (Node.js)
+  |           '-- New .env file entries (KEY=value patterns)
+  |
+  |-- Push branch: claude/{ticket-id} --> origin
+  |
+  |-- Create GitHub PR:
+  |     |-- Title: TICKET-ID: <ticket title>
+  |     |-- Base: dev (configurable via TARGET_BRANCH)
+  |     |-- Body:
+  |     |     ## Summary
+  |     |     <commit messages>
+  |     |
+  |     |     ## Ticket
+  |     |     [TICKET-ID](url)
+  |     |
+  |     |     ## Changes Made
+  |     |     <file list + diff stats>
+  |     |
+  |     |     ## Acceptance Criteria
+  |     |     <checkboxes parsed from ticket description>
+  |     |
+  |     |     ## Environment Changes (if any)
+  |     |     <detected env file changes + new env variables>
+  |     |
+  |     '-- Fallback: manual compare URL if gh CLI fails
+  |
+  '-- Clean up worktree
 
-### Visual Flow Summary
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        NightShift Pipeline                          │
-│                                                                     │
-│  ┌──────────┐   ┌───────────┐   ┌──────────┐   ┌────────────────┐ │
-│  │ COLLECT  │──>│  PREPARE  │──>│  SCOPE   │──>│   Per Repo:    │ │
-│  │          │   │           │   │          │   │                │ │
-│  │ Linear   │   │ Pathfinder│   │ Normal / │   │ ┌────────────┐│ │
-│  │ tickets  │   │ parse +   │   │ Parent / │   │ │ TEST AGENT ││ │
-│  │ sorted   │   │ LLM repo  │   │ Subtask  │   │ │ (Sentinel) ││ │
-│  │ by       │   │ filter +  │   │ context  │   │ └─────┬──────┘│ │
-│  │ priority │   │ clone     │   │          │   │       │       │ │
-│  └──────────┘   └───────────┘   └──────────┘   │ ┌─────▼──────┐│ │
-│                                                  │ │ DEV AGENT  ││ │
-│                                                  │ │ (TDD impl) ││ │
-│                                                  │ └─────┬──────┘│ │
-│                                                  │       │       │ │
-│                                                  │ ┌─────▼──────┐│ │
-│                                                  │ │ PUSH + PR  ││ │
-│                                                  │ └────────────┘│ │
-│                                                  └────────────────┘ │
-│                                                          │          │
-│                                              ┌───────────▼────────┐ │
-│                                              │ Comment on Linear  │ │
-│                                              │ Move to Code Review│ │
-│                                              └────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Linear Ticket Lifecycle
-
-```
-  Backlog / Todo
-       │
-       ▼
-  Pathfinder analyzes
-       │
-       ▼
-  Ready for Development  ◄── NightShift picks up here
-       │
-       ▼
-  In Progress            ◄── NightShift moves here when starting
-       │
-       ▼
-  Code Review            ◄── NightShift moves here when PR is created
-       │
-       ▼
-  Ready to Deploy - DEV  ◄── After human review approval
-       │
-       ▼
-  (QA → Prod flow)
+After all repos complete:
+  |
+  |-- Transition ticket to "Code Review"
+  |-- Comment on ticket:
+  |     Development complete. Branch and PR created automatically.
+  |
+  |     **Branch:** claude/{ticket-id}
+  |     **PR:** <url>
+  |
+  |     ### Changes Summary
+  |     <commit messages + files changed + diff stats>
+  |
+  |     ### Environment Changes (if any)
+  |     <detected changes>
+  |
+  |     Changes were committed and pushed. Ticket moved to Code Review.
+  |
+  '-- Mark as processed (won't pick up again)
 ```
 
 ---
 
-## Key Components
+## Architecture
 
-### Pathfinder Parser (`engine/skills/pathfinder_parser.py`)
-Extracts structured data from Pathfinder's analysis comments:
-- Classification (BUG/FEATURE), complexity (S/M/L/XL)
-- Affected repos with contextual notes ("Primary Changes", "No Changes Needed")
-- Code changes table (file → function → change type)
-- File hints for investigation starting points
+```
++-------------------------------------------------------------------+
+|                       NightShift Pipeline                         |
+|                                                                   |
+|  +-----------+   +------------+   +---------+                     |
+|  |  COLLECT  |-->|  PREPARE   |-->|  SCOPE  |--+                  |
+|  |           |   |            |   |         |  |                  |
+|  | Linear    |   | Pathfinder |   | normal/ |  |                  |
+|  | tickets   |   | parse +   |   | parent/ |  |                  |
+|  | sorted by |   | LLM repo  |   | subtask |  |                  |
+|  | priority  |   | filter +  |   |         |  |                  |
+|  +-----------+   | clone     |   +---------+  |                  |
+|                  +------------+                |                  |
+|                                                |                  |
+|                          +---------------------+                  |
+|                          |                                        |
+|                          v                                        |
+|              +-----------+-----------+                             |
+|              | Per Repo (parallel)   |                             |
+|              |                       |                             |
+|              |  +------------------+ |                             |
+|              |  |   TEST AGENT     | |   Max 30 turns             |
+|              |  |   (Sentinel)     | |   15 min timeout           |
+|              |  +--------+---------+ |                             |
+|              |           |           |                             |
+|              |  +--------v---------+ |                             |
+|              |  |   DEV AGENT      | |   Max 30 turns             |
+|              |  |   (TDD impl)     | |   15 min timeout           |
+|              |  +--------+---------+ |                             |
+|              |           |           |                             |
+|              |  +--------v---------+ |                             |
+|              |  | SUMMARY + PUSH   | |   Commits, diff stats,    |
+|              |  | + CREATE PR      | |   env change detection    |
+|              |  +------------------+ |                             |
+|              +-----------+-----------+                             |
+|                          |                                        |
+|              +-----------v-----------+                             |
+|              | Update Linear ticket  |                             |
+|              | Branch + PR + Summary |                             |
+|              | Move to Code Review   |                             |
+|              +-----------------------+                             |
++-------------------------------------------------------------------+
 
-### LLM Repo Filter (`engine/skills/repo_filter.py`)
-Lightweight Claude CLI call that reads the full Pathfinder analysis and determines which repos actually need code changes. Uses semantic understanding — not string matching — so it handles any phrasing Pathfinder might use.
+Concurrency:
+  Tickets  --->  ThreadPoolExecutor (MAX_CONCURRENT_TICKETS, default: 2)
+  Repos    --->  ThreadPoolExecutor (MAX_CONCURRENT_REPOS, default: 3)
+```
+
+### Ticket Lifecycle
+
+```
+  Backlog / Todo
+       |
+       v
+  Pathfinder analyzes (writes RCA or TRD comment)
+       |
+       v
+  Ready for Development  <-- NightShift picks up here
+       |
+       v
+  In Progress            <-- NightShift moves here when starting
+       |
+       v
+  Code Review            <-- NightShift moves here when PR is created
+       |
+       v
+  Ready to Deploy - DEV  <-- After human review approval
+       |
+       v
+  (QA --> Prod flow)
+```
+
+---
+
+## Components
+
+### Core Orchestrator (`engine/lib/core.py`)
+Three-phase processing engine with parallel execution:
+- **Phase 1 (COLLECT):** Fetch, filter, sort tickets by priority
+- **Phase 2 (PREPARE):** Parse Pathfinder, LLM-filter repos, clone in parallel
+- **Phase 3 (EXECUTE):** Process tickets in parallel, repos in parallel within each ticket
+- **Change Summary:** Extracts commit messages, diff stats, detects env changes
+- **PR Creation:** Structured PR body with summary, changes, acceptance criteria, env changes
+- **`gh` Fallback:** Returns manual compare URL when `gh pr create` fails
+
+### Linear Client (`engine/lib/linear_client.py`)
+GraphQL API client for all Linear operations:
+- Fetch viewer, teams, issues (with labels, project, state)
+- Issue state transitions, comment creation
+- Children/parent fetching (with assignees for scope resolution)
+- Relations, attachments
 
 ### Developer Skill (`engine/skills/developer_skill.py`)
-Intelligence layer between ticket fetching and Claude Code execution:
-- Resolves ticket scope (normal / parent with subtasks / subtask)
-- Enriches context with sub-issues, relations, acceptance criteria
+Intelligence layer between ticket fetching and Claude Code:
+- Resolves ticket scope: `normal` | `parent_with_subtasks` | `subtask`
+- Resolves repos: Pathfinder > labels > URLs > parent > project > team key
+- Detects stack: `backend` | `frontend` | `fullstack`
 - Builds repo-scoped prompts for Test Agent and Dev Agent
+- Enriches context with sub-issues, relations, acceptance criteria
 
 ### Sentinel Integration (`engine/skills/sentinel_integration.py`)
 Loads Sentinel Guardian test skills based on detected stack:
-- Detects backend/frontend/fullstack from project files
-- Concatenates relevant skill instructions into a single test prompt
-- 13 test skills covering unit, integration, API, security, etc.
+- **Backend:** 9 skills (test-setup, unit, integration, contract, security, resilience, smoke, e2e-api, test-review)
+- **Frontend:** 4 skills (test-setup, unit, e2e-browser, test-review)
+- **Fullstack:** 10 skills (all backend + e2e-browser)
+- Only loads skills that exist on disk, silently skips missing ones
+- Concatenates all applicable skills into a single test prompt
 
 ### Ticket Enricher (`engine/skills/ticket_enricher.py`)
-Deep context extraction from Linear:
-- Discussion thread (all comments with authors and dates)
-- Sub-issues and their statuses
-- Related issues (blocking/blocked-by/duplicates)
-- Acceptance criteria parsing
-- File hints from descriptions and comments
+Deep context extraction from Linear (7 parallel API calls):
+- Discussion thread (up to 50 comments with authors and dates)
+- Sub-issues, parent context, relations, attachments
+- Acceptance criteria parsing (supports `## Acceptance Criteria`, `## AC`, `## Requirements`, checkboxes, bullets, numbered lists)
+- File hints extracted from descriptions and comments
 
-### Core Orchestrator (`engine/lib/core.py`)
-Three-phase processing engine:
-- **Phase 1 (COLLECT):** Fetch, filter, sort tickets
-- **Phase 2 (PREPARE):** Parse Pathfinder, filter repos, clone in parallel
-- **Phase 3 (EXECUTE):** Process tickets in parallel (configurable concurrency)
+### Pathfinder Parser (`engine/skills/pathfinder_parser.py`)
+Extracts structured data from Pathfinder analysis comments:
+- Classification (`BUG` / `FEATURE` / `TASK`), complexity (`S` / `M` / `L` / `XL`)
+- Affected repos with contextual notes per repo
+- Code changes table (repo, file, function, change type, description)
+- Implementation order, file hints
+
+### LLM Repo Filter (`engine/skills/repo_filter.py`)
+Lightweight Claude CLI call (max-turns 2, 30s timeout) that reads the Pathfinder analysis and determines which repos actually need code changes. Uses semantic understanding, not string matching. Falls back to full list on failure. Skipped if only 1 repo.
+
+---
+
+## Quick Start
+
+### 1. Clone and Configure
+
+```bash
+git clone https://github.com/Rishabh-Kala-ruh/NightShift.git
+cd NightShift
+cp .env.example .env
+# Edit .env with your credentials
+```
+
+### 2. Deploy
+
+```bash
+docker compose up -d --build
+
+# Authenticate Claude Code (one-time)
+docker exec -it nightshift claude setup-token
+
+# Verify
+docker exec nightshift claude auth status
+docker logs nightshift --tail 20
+```
+
+### 3. Run
+
+```bash
+# Single scan (process all eligible tickets once)
+docker exec nightshift python3 engine/run_once.py
+
+# View logs
+docker logs nightshift --tail 50
+
+# Search for specific ticket
+docker logs nightshift 2>&1 | grep RUH-XXX
+```
+
+The container runs `engine/main.py` by default, which polls every `POLL_INTERVAL_MINUTES` (default: 60).
+
+---
+
+## Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LINEAR_API_KEY` | Linear API key | Required |
+| `GITHUB_ORG` | GitHub organization | `ruh-ai` |
+| `TARGET_BRANCH` | Base branch for PRs | `dev` |
+| `GH_TOKEN` | GitHub Personal Access Token | Required |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token | Required |
+| `MAX_CONCURRENT_TICKETS` | Parallel ticket limit | `2` |
+| `MAX_CONCURRENT_REPOS` | Parallel repos per ticket | `3` |
+| `POLL_INTERVAL_MINUTES` | Scan frequency (minutes) | `60` |
+| `CLAUDE_CMD` | Claude CLI command | `claude` |
+| `REPOS_DIR` | Where repos are cloned | `./repos` |
+| `LOGS_DIR` | Log file directory | `./logs` |
+| `REPO_MAP` | JSON map of repo name to local path | `{}` |
+| `SENTINEL_SKILLS_PATH` | Sentinel Guardian skills directory | Auto-detected |
+
+---
+
+## Docker Setup
+
+**Base image:** `python:3.12-slim`
+
+**Installed tools:** git, openssh-client, curl, GitHub CLI (`gh`), Node.js 20, Claude Code (`@anthropic-ai/claude-code`)
+
+**Volumes:**
+- `repos-data` --- cloned repositories (`/app/repos`)
+- `logs-data` --- automation logs (`/app/logs`)
+- `claude-data` --- Claude Code config (`/root/.claude`)
+- `gh-data` --- GitHub CLI auth (`/root/.config/gh`)
+- SSH key mounted read-only for git operations
+- Sentinel skills mounted read-only at `/app/sentinel-skills`
+
+**Git identity:** `NightShift Bot <nightshift@ruh-ai.com>`
+
+---
+
+## Project Structure
+
+```
+NightShift/
+|-- IDENTITY.md              # Agent identity
+|-- SOUL.md                  # Core behavior + hard rules
+|-- ARCHITECTURE.md          # System design
+|-- TOOLS.md                 # Available tools reference
+|-- AGENTS.md                # Sub-agent overview
+|-- agents/                  # OpenClaw agent definitions
+|   |-- test-agent.md
+|   '-- dev-agent.md
+|-- skills/                  # OpenClaw skill definitions
+|   |-- ticket-scanner/
+|   |-- pathfinder-reader/
+|   |-- test-generator/
+|   |-- implementer/
+|   '-- pr-creator/
+|-- commands/                # OpenClaw chat commands
+|   |-- scan.md
+|   |-- status.md
+|   '-- check.md
+|-- engine/                  # Python execution engine
+|   |-- lib/
+|   |   |-- config.py        # Environment config loader
+|   |   |-- core.py          # 3-phase orchestrator + PR creation
+|   |   '-- linear_client.py # Linear GraphQL API client
+|   |-- skills/
+|   |   |-- agents/
+|   |   |   |-- test-agent.md        # Test Agent definition
+|   |   |   '-- dev-agent.md         # Dev Agent definition
+|   |   |-- developer-skill/
+|   |   |   '-- SKILL.md             # TDD workflow instructions
+|   |   |-- ticket_enricher.py       # Deep ticket context (7 parallel API calls)
+|   |   |-- developer_skill.py       # Scope resolution + prompt building
+|   |   |-- sentinel_integration.py  # Sentinel skill loading + stack detection
+|   |   |-- pathfinder_parser.py     # Pathfinder comment parser
+|   |   '-- repo_filter.py           # LLM-based repo filtering
+|   |-- main.py              # Continuous loop mode
+|   '-- run_once.py          # Single-scan mode
+|-- Dockerfile
+|-- docker-compose.yml
+|-- entrypoint.sh
+|-- requirements.txt         # python-dotenv, requests
+'-- .env.example
+```
 
 ---
 
@@ -294,99 +499,6 @@ openclaw agent --agent nightshift -m "scan for tickets" --timeout 3600
 openclaw cron add --name nightshift-scan --every 1h \
   --message "docker exec nightshift python3 engine/run_once.py" \
   --timeout 3600000
-```
-
----
-
-## Quick Start
-
-### 1. Clone and Configure
-
-```bash
-git clone https://github.com/Rishabh-Kala-ruh/NightShift.git
-cd NightShift
-cp .env.example .env
-# Edit .env with your credentials
-```
-
-### 2. Deploy to Server
-
-```bash
-ssh user@your-server
-cd NightShift
-docker compose up -d --build
-
-# Authenticate Claude Code (one-time)
-docker exec -it nightshift claude setup-token
-
-# Verify
-docker exec nightshift claude auth status
-docker logs nightshift --tail 20
-```
-
-### 3. Register with OpenClaw
-
-```bash
-openclaw agents add nightshift --workspace ~/NightShift --non-interactive
-```
-
----
-
-## Configuration
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LINEAR_API_KEY` | Linear API key | Required |
-| `GITHUB_ORG` | GitHub organization | `ruh-ai` |
-| `TARGET_BRANCH` | Base branch for PRs | `dev` |
-| `GH_TOKEN` | GitHub Personal Access Token | Required |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token | Required |
-| `MAX_CONCURRENT_TICKETS` | Parallel ticket limit | `2` |
-| `POLL_INTERVAL_MINUTES` | Scan frequency | `60` |
-| `SENTINEL_SKILLS_PATH` | Sentinel Guardian skills | Auto-detected |
-
----
-
-## Project Structure
-
-```
-NightShift/
-├── IDENTITY.md              # Agent identity
-├── SOUL.md                  # Core behavior + hard rules
-├── ARCHITECTURE.md          # System design
-├── TOOLS.md                 # Available tools
-├── AGENTS.md                # Sub-agent overview
-├── agents/                  # OpenClaw agent definitions
-│   ├── test-agent.md
-│   └── dev-agent.md
-├── skills/                  # OpenClaw skill definitions
-│   ├── ticket-scanner/
-│   ├── pathfinder-reader/
-│   ├── test-generator/
-│   ├── implementer/
-│   └── pr-creator/
-├── commands/                # OpenClaw chat commands
-│   ├── scan.md
-│   ├── status.md
-│   └── check.md
-├── engine/                  # Python execution engine
-│   ├── lib/
-│   │   ├── config.py        # Environment config loader
-│   │   ├── core.py          # 3-phase orchestrator
-│   │   └── linear_client.py # Linear GraphQL API client
-│   ├── skills/
-│   │   ├── ticket_enricher.py       # Deep ticket context extraction
-│   │   ├── developer_skill.py       # Scope resolution + prompt building
-│   │   ├── sentinel_integration.py  # Sentinel skill loading + stack detection
-│   │   ├── pathfinder_parser.py     # Pathfinder comment parser
-│   │   └── repo_filter.py          # LLM-based repo filtering
-│   ├── main.py              # Continuous loop mode
-│   └── run_once.py          # Single-scan mode
-├── Dockerfile
-├── docker-compose.yml
-├── entrypoint.sh
-├── requirements.txt
-└── .env.example
 ```
 
 ---

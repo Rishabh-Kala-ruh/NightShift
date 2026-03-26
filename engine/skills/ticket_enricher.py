@@ -107,9 +107,12 @@ def parse_acceptance_criteria(description: str) -> list[str]:
     for line in lines:
         trimmed = line.strip()
 
+        # Strip markdown header prefix (##, ###, etc.) before matching section name
+        stripped_header = re.sub(r"^#{1,6}\s*", "", trimmed)
+
         if re.match(
             r"^(acceptance\s+criteria|ac|requirements|expected\s+behavior|definition\s+of\s+done)",
-            trimmed,
+            stripped_header,
             re.IGNORECASE,
         ):
             in_ac_section = True
@@ -121,7 +124,11 @@ def parse_acceptance_criteria(description: str) -> list[str]:
             continue
 
         if in_ac_section:
-            if trimmed == "" or re.match(r"^(##|---|\*\*\*)", trimmed):
+            # A new markdown heading (different section) or separator ends the AC section
+            if trimmed == "" or (re.match(r"^#{1,6}\s+", trimmed) and not re.match(
+                r"^#{1,6}\s*(acceptance\s+criteria|ac|requirements|expected\s+behavior|definition\s+of\s+done)",
+                trimmed, re.IGNORECASE,
+            )) or re.match(r"^(---|\*\*\*)", trimmed):
                 in_ac_section = False
                 continue
             bullet = re.match(r"^[-*•]\s*(.+)", trimmed)

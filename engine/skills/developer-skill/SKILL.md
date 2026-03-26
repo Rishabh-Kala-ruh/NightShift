@@ -39,7 +39,14 @@ You MUST follow **Test-Driven Development (TDD)**. Tests are the contract — co
 7. **Implement the fix or feature** described in the ticket. Follow existing code style.
 8. **Run the tests again** after implementation.
 9. **If tests fail**: fix your IMPLEMENTATION code, NOT the tests. Repeat until all tests pass.
-10. **Commit the implementation** with message: `fix({{TICKET_ID}}): <short summary of what was changed>`
+10. **Commit the implementation** with a multi-line message:
+    ```
+    {{TICKET_ID}}: <ticket title>
+
+    <2-3 sentence summary of what was changed and why>
+
+    Resolves: {{TICKET_ID}}
+    ```
 
 ---
 
