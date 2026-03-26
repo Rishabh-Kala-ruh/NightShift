@@ -542,6 +542,7 @@ def process_tickets() -> None:
         # ── Phase 2: PREPARE — detect repos (with Pathfinder) and clone in parallel ──
 
         from skills.pathfinder_parser import parse_pathfinder_comment
+        from skills.repo_filter import filter_repos
 
         all_repo_entries: dict[str, RepoEntry] = {}  # repo_name -> entry (deduplicated)
         issue_repos: list[tuple[dict[str, Any], str, list[RepoEntry]]] = []
@@ -556,11 +557,16 @@ def process_tickets() -> None:
                 comments = linear.get_issue_comments(issue["id"])
                 pf = parse_pathfinder_comment(comments)
                 if pf and pf.repos:
+                    log(f"  [{issue['identifier']}] Pathfinder repos (raw): {pf.repos}")
+
+                    # LLM pre-analysis: filter out repos that need no changes
+                    filtered_names = filter_repos(pf.full_comment, pf.repos)
+
                     entries = [
                         RepoEntry(name=r, clone_url=f"git@github.com:{GITHUB_ORG}/{r}.git")
-                        for r in pf.repos
+                        for r in filtered_names
                     ]
-                    log(f"  [{issue['identifier']}] Pathfinder repos: {pf.repos}")
+                    log(f"  [{issue['identifier']}] Pathfinder repos (filtered): {filtered_names}")
             except Exception:
                 pass
 
