@@ -27,6 +27,7 @@ except json.JSONDecodeError:
     sys.exit(1)
 
 MAX_CONCURRENT_TICKETS: int = int(os.getenv("MAX_CONCURRENT_TICKETS", "2"))
+MAX_CONCURRENT_REPOS: int = int(os.getenv("MAX_CONCURRENT_REPOS", "3"))
 
 # Path to Sentinel Guardian skills directory (for test generation)
 # In Docker: mounted at /app/sentinel-skills via docker-compose.yml

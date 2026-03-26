@@ -22,7 +22,7 @@ from typing import Any
 from lib.config import (
     LINEAR_API_KEY, GITHUB_ORG, TARGET_BRANCH, LOGS_DIR,
     CLAUDE_CMD, REPOS_DIR, REPO_MAP, PROCESSING_LABEL, DONE_LABEL,
-    MAX_CONCURRENT_TICKETS, SENTINEL_SKILLS_PATH,
+    MAX_CONCURRENT_TICKETS, MAX_CONCURRENT_REPOS, SENTINEL_SKILLS_PATH,
 )
 from lib.linear_client import LinearClient
 from skills.developer_skill import DeveloperSkill, DeveloperResult
@@ -361,22 +361,22 @@ def run_claude_code(
     worktree_path: str, issue: dict[str, Any], repo_name: str, team_key: str
 ) -> bool:
     identifier = issue["identifier"]
-    log_file = os.path.join(LOGS_DIR, f"claude_{identifier}.log")
+    log_file = os.path.join(LOGS_DIR, f"claude_{identifier}_{repo_name}.log")
 
     # Clear log file for fresh run
     with open(log_file, "w") as f:
-        f.write(f"# Claude Code log for {identifier}\n")
+        f.write(f"# Claude Code log for {identifier} ({repo_name})\n")
 
     if not dev_skill:
         log(f"ERROR: Developer Skill not initialized for {identifier}")
         return False
 
     # Use developer skill for scope-aware prompt building
-    log(f"Developer Skill processing {identifier}...")
+    log(f"Developer Skill processing {identifier} ({repo_name})...")
     try:
         result = dev_skill.process(issue, team_key, worktree_path, repo_name)
     except RuntimeError as err:
-        log(f"FAILED: {identifier} — {err}")
+        log(f"FAILED: {identifier} ({repo_name}) — {err}")
         with open(log_file, "a") as f:
             f.write(f"\nFAILED: {err}\n")
         return False
@@ -393,16 +393,16 @@ def run_claude_code(
     )
 
     # ── Agent 1: Test Agent ───────────────────────────────────────────
-    log(f"[{identifier}] Starting Test Agent...")
-    test_prompt_file = os.path.join(LOGS_DIR, f"prompt_test_{identifier}.txt")
+    log(f"[{identifier}] Starting Test Agent for {repo_name}...")
+    test_prompt_file = os.path.join(LOGS_DIR, f"prompt_test_{identifier}_{repo_name}.txt")
     with open(test_prompt_file, "w") as f:
         f.write(result.test_prompt)
 
     test_ok = _run_claude(identifier, test_prompt_file, log_file, worktree_path, "Test Agent")
     if not test_ok:
-        log(f"[{identifier}] Test Agent failed — skipping implementation")
+        log(f"[{identifier}] Test Agent failed for {repo_name} — skipping implementation")
         return False
-    log(f"[{identifier}] Test Agent complete — tests committed.")
+    log(f"[{identifier}] Test Agent complete for {repo_name} — tests committed.")
 
     # ── Agent 2: Dev Agent ────────────────────────────────────────────
     # Verify worktree still exists (Test Agent's Claude may have removed it)
@@ -418,8 +418,8 @@ def run_claude_code(
             log(f"[{identifier}] Failed to recreate worktree: {err}")
             return False
 
-    log(f"[{identifier}] Starting Dev Agent...")
-    impl_prompt_file = os.path.join(LOGS_DIR, f"prompt_impl_{identifier}.txt")
+    log(f"[{identifier}] Starting Dev Agent for {repo_name}...")
+    impl_prompt_file = os.path.join(LOGS_DIR, f"prompt_impl_{identifier}_{repo_name}.txt")
     with open(impl_prompt_file, "w") as f:
         f.write(result.impl_prompt)
 
@@ -535,6 +535,40 @@ def comment_on_issue(issue_id: str, body: str) -> None:
         log(f"Comment failed: {err}")
 
 
+# ── Per-Repo Processor (runs in thread) ───────────────────────────────────────
+
+def _process_repo(
+    entry: RepoEntry, issue: dict[str, Any], team_key: str, identifier: str,
+) -> tuple[str | None, tuple[str, dict[str, Any]] | None]:
+    """Process one repo for a ticket. Returns (pr_url, (repo_name, summary)) or (None, None)."""
+    log(f"  [{identifier}] Working on repo: {entry.name}")
+    try:
+        # Per-repo lock: prevents concurrent clone/fetch on the same repo
+        with _get_repo_lock(entry.name):
+            repo_path = get_repo_path(entry.name, entry.clone_url)
+            branch_name = f"claude/{identifier.lower()}"
+            worktree_path = create_worktree(repo_path, branch_name)
+
+        # Claude Code and PR creation run outside the repo lock
+        # (worktrees are fully isolated)
+        success = run_claude_code(worktree_path, issue, entry.name, team_key)
+
+        if success:
+            change_summary = generate_change_summary(worktree_path)
+            pr_url = push_and_create_pr(
+                worktree_path, entry.name, branch_name, issue, change_summary,
+            )
+            cleanup_worktree(repo_path, worktree_path)
+            if pr_url:
+                return pr_url, (entry.name, change_summary)
+        else:
+            cleanup_worktree(repo_path, worktree_path)
+    except Exception as err:
+        log(f"  [{identifier}] Error on repo {entry.name}: {err}")
+
+    return None, None
+
+
 # ── Single Issue Processor (runs in thread) ──────────────────────────────────
 
 def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: list[RepoEntry] | None = None) -> None:
@@ -558,31 +592,25 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
         pr_urls: list[str] = []
         repo_summaries: list[tuple[str, dict[str, Any]]] = []
 
-        for entry in repo_entries:
-            log(f"  [{identifier}] Working on repo: {entry.name}")
-            try:
-                # Per-repo lock: prevents concurrent clone/fetch on the same repo
-                with _get_repo_lock(entry.name):
-                    repo_path = get_repo_path(entry.name, entry.clone_url)
-                    branch_name = f"claude/{identifier.lower()}"
-                    worktree_path = create_worktree(repo_path, branch_name)
+        # Process repos in parallel — worktrees are fully isolated
+        max_workers = min(len(repo_entries), MAX_CONCURRENT_REPOS)
+        log(f"  [{identifier}] Processing {len(repo_entries)} repo(s) with {max_workers} worker(s)...")
 
-                # Claude Code and PR creation run outside the repo lock
-                # (worktrees are fully isolated)
-                success = run_claude_code(worktree_path, issue, entry.name, team_key)
-
-                if success:
-                    change_summary = generate_change_summary(worktree_path)
-                    pr_url = push_and_create_pr(
-                        worktree_path, entry.name, branch_name, issue, change_summary,
-                    )
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_process_repo, entry, issue, team_key, identifier): entry.name
+                for entry in repo_entries
+            }
+            for future in as_completed(futures):
+                repo_name = futures[future]
+                try:
+                    pr_url, repo_summary = future.result()
                     if pr_url:
                         pr_urls.append(pr_url)
-                        repo_summaries.append((entry.name, change_summary))
-
-                cleanup_worktree(repo_path, worktree_path)
-            except Exception as err:
-                log(f"  [{identifier}] Error on repo {entry.name}: {err}")
+                    if repo_summary:
+                        repo_summaries.append(repo_summary)
+                except Exception as err:
+                    log(f"  [{identifier}] Error on repo {repo_name}: {err}")
 
         if pr_urls:
             transition_issue(issue, "started", state_name="Code Review")
