@@ -50,6 +50,7 @@ class PathfinderAnalysis:
     file_changes: list[FileChange] = field(default_factory=list)
     file_hints: list[str] = field(default_factory=list)
     implementation_order: list[str] = field(default_factory=list)
+    repo_notes: dict[str, str] = field(default_factory=dict)  # repo name -> context note (e.g. "Primary Changes", "No Changes Needed")
 
 
 def find_pathfinder_comment(comments: list[dict]) -> dict | None:
@@ -89,6 +90,7 @@ def parse_pathfinder_comment(comments: list[dict]) -> PathfinderAnalysis | None:
     primary_repo: str | None = None
 
     # Format 1: "**Repos Affected:** agent-platform-v2 (primary), ai-gateway (possible)"
+    repo_notes: dict[str, str] = {}
     m = re.search(r"\*\*Repos Affected:\*\*\s*(.+)", body)
     if m:
         repos_line = m.group(1).strip()
@@ -100,13 +102,19 @@ def parse_pathfinder_comment(comments: list[dict]) -> PathfinderAnalysis | None:
                 repos.append(repo_name)
                 if "primary" in part.lower():
                     primary_repo = repo_name
+                # Extract parenthetical note
+                note_match = re.search(r"\(([^)]+)\)", part)
+                if note_match:
+                    repo_notes[repo_name] = note_match.group(1).strip()
 
     # Format 2: "#### Repo 1: `agent-platform-v2` (Primary Changes)"
     if not repos:
-        for m in re.finditer(r"#{1,4}\s+Repo\s+\d+:\s+`?([\w.-]+)`?", body):
+        for m in re.finditer(r"#{1,4}\s+Repo\s+\d+:\s+`?([\w.-]+)`?\s*(?:\(([^)]*)\))?", body):
             repo_name = m.group(1)
             if repo_name not in repos:
                 repos.append(repo_name)
+            if m.group(2):
+                repo_notes[repo_name] = m.group(2).strip()
 
     # Format 3: "### agent-platform-v2" or "### agent-platform-v2 (Primary)"
     # (already handled in code changes table section below)
@@ -135,12 +143,15 @@ def parse_pathfinder_comment(comments: list[dict]) -> PathfinderAnalysis | None:
         # Detect repo header formats:
         #   "### agent-platform-v2" / "### agent-platform-v2 (Primary)"
         #   "#### Repo 1: `agent-platform-v2` (Primary Changes)"
-        repo_header = re.match(r"#{2,4}\s+(?:Repo\s+\d+:\s+)?`?([\w.-]+)`?", line)
+        repo_header = re.match(r"#{2,4}\s+(?:Repo\s+\d+:\s+)?`?([\w.-]+)`?\s*(?:\(([^)]*)\))?", line)
         if repo_header and "/" not in repo_header.group(1):
             candidate = repo_header.group(1)
             # Skip generic headers like "Requirements", "Risks", etc.
             if not candidate[0].isupper() or candidate in repos or candidate.count("-") >= 1:
                 current_repo = candidate
+                # Capture parenthetical note (e.g. "Primary Changes", "No Changes Needed")
+                if repo_header.group(2) and current_repo not in repo_notes:
+                    repo_notes[current_repo] = repo_header.group(2).strip()
             continue
 
         # Parse table rows
@@ -216,4 +227,5 @@ def parse_pathfinder_comment(comments: list[dict]) -> PathfinderAnalysis | None:
         file_changes=file_changes,
         file_hints=unique_hints,
         implementation_order=implementation_order,
+        repo_notes=repo_notes,
     )

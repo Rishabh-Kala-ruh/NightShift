@@ -404,14 +404,35 @@ class DeveloperSkill:
             label = "RCA (Root Cause Analysis)" if pathfinder.classification == "BUG" else "TRD (Technical Requirements Document)"
             sections.append(f"\n## Pathfinder {label}")
             sections.append(f"**Classification:** {pathfinder.classification} | **Complexity:** {pathfinder.complexity}")
+
+            # Check if Pathfinder noted this repo as needing no changes
+            repo_note = pathfinder.repo_notes.get(repo_name, "")
+            if repo_note:
+                sections.append(f"**Pathfinder note for this repo ({repo_name}):** {repo_note}")
+            no_change_keywords = ("no change", "no modification", "no action", "already handles", "pass-through")
+            if any(kw in repo_note.lower() for kw in no_change_keywords):
+                sections.append(f"\n> ⚠ **Pathfinder indicates this repo ({repo_name}) may not need changes.** Verify carefully before making modifications.")
+
             sections.append(f"\n> **This is your primary source of truth.** The Pathfinder analysis below contains the exact root cause, fix approach, and code changes table. Follow it precisely.")
             sections.append(f"\n{pathfinder.full_comment}")
 
-            if pathfinder.file_changes:
-                sections.append(f"\n### Code Changes Summary (from Pathfinder)")
-                sections.append(f"> These are the exact files and functions you need to modify:")
-                for fc in pathfinder.file_changes:
+            # Scope code changes to the current repo
+            repo_changes = [fc for fc in pathfinder.file_changes if fc.repo == repo_name]
+            other_changes = [fc for fc in pathfinder.file_changes if fc.repo and fc.repo != repo_name]
+
+            if repo_changes:
+                sections.append(f"\n### Code Changes for This Repo: {repo_name} (from Pathfinder)")
+                sections.append(f"> These are the exact files and functions you need to modify in this repo:")
+                for fc in repo_changes:
                     sections.append(f"- **{fc.change_type}** `{fc.file}` → `{fc.function}` — {fc.description}")
+            elif pathfinder.file_changes:
+                sections.append(f"\n### Code Changes Summary (from Pathfinder)")
+                sections.append(f"> Note: Pathfinder listed changes for other repos ({', '.join(set(fc.repo for fc in other_changes if fc.repo))}), but none specifically for {repo_name}.")
+
+            if other_changes:
+                sections.append(f"\n### Code Changes in Other Repos (for context only — DO NOT modify)")
+                for fc in other_changes:
+                    sections.append(f"- [{fc.repo}] **{fc.change_type}** `{fc.file}` → `{fc.function}` — {fc.description}")
 
         # ── Parent Context (for sub-tasks) ───────────────────────────
         if scope_type == "subtask" and parent_info:
