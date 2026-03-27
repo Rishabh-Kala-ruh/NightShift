@@ -46,11 +46,23 @@ dev_skill: DeveloperSkill | None = None
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 PROCESSED_FILE = os.path.join(LOGS_DIR, "processed_issues.json")
+# Fully completed issues — skip entirely on next scan
 processed_issues: set[str] = set()
+# Tracks which repos succeeded per issue — on retry, only process failed repos
+# Format: { "issue-id": ["repo-a", "repo-b"] }
+COMPLETED_REPOS_FILE = os.path.join(LOGS_DIR, "completed_repos.json")
+completed_repos: dict[str, list[str]] = {}
+
 if os.path.exists(PROCESSED_FILE):
     try:
         with open(PROCESSED_FILE) as f:
             processed_issues = set(json.load(f))
+    except Exception:
+        pass
+if os.path.exists(COMPLETED_REPOS_FILE):
+    try:
+        with open(COMPLETED_REPOS_FILE) as f:
+            completed_repos = json.load(f)
     except Exception:
         pass
 
@@ -74,6 +86,12 @@ def save_processed() -> None:
     with _processed_lock:
         with open(PROCESSED_FILE, "w") as f:
             json.dump(list(processed_issues), f, indent=2)
+
+
+def save_completed_repos() -> None:
+    with _processed_lock:
+        with open(COMPLETED_REPOS_FILE, "w") as f:
+            json.dump(completed_repos, f, indent=2)
 
 
 def log(msg: str) -> None:
@@ -614,8 +632,22 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
         repo_entries = detect_repos(issue, labels, team_key, project_name)
     log(f"Repos: {', '.join(r.clone_url or f'{GITHUB_ORG}/{r.name}' for r in repo_entries)}")
 
+    # Skip repos that already succeeded in a previous run
+    issue_id = issue["id"]
+    already_done = set(completed_repos.get(issue_id, []))
+    if already_done:
+        original_count = len(repo_entries)
+        repo_entries = [e for e in repo_entries if e.name not in already_done]
+        log(f"  [{identifier}] Skipping {original_count - len(repo_entries)} already-completed repo(s): {', '.join(already_done)}")
+        if not repo_entries:
+            log(f"  [{identifier}] All repos already completed — marking as done")
+            with _processed_lock:
+                processed_issues.add(issue_id)
+            save_processed()
+            return
+
     try:
-        transition_issue(issue, "started", state_name="In Progress")
+        transition_issue(issue, "started", state_name="In Development")
         pr_urls: list[str] = []
         repo_summaries: list[tuple[str, dict[str, Any]]] = []
 
@@ -644,10 +676,7 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
                     failed_repos.append(repo_name)
 
         if pr_urls:
-            # Only move to Code Review if ALL repos succeeded
-            if not failed_repos:
-                transition_issue(issue, "started", state_name="Code Review")
-            else:
+            if failed_repos:
                 log(f"  [{identifier}] Partial success — {len(failed_repos)} repo(s) failed: {', '.join(failed_repos)}")
 
             # Build ticket comment
@@ -705,17 +734,37 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
 
             log(f"Done: {identifier} -> {', '.join(pr_urls)}")
 
-            # Only mark as processed if ALL repos succeeded
-            if not failed_repos:
+            # Track which repos succeeded (for smart retry)
+            succeeded_repos = [name for name, _ in repo_summaries]
+            if succeeded_repos:
                 with _processed_lock:
-                    processed_issues.add(issue["id"])
+                    prev = completed_repos.get(issue_id, [])
+                    completed_repos[issue_id] = list(set(prev + succeeded_repos))
+                save_completed_repos()
+
+            # Mark as fully processed only if ALL repos succeeded (including previously completed ones)
+            all_done = set(completed_repos.get(issue_id, []))
+            if not failed_repos:
+                transition_issue(issue, "started", state_name="Code Review")
+                with _processed_lock:
+                    processed_issues.add(issue_id)
                 save_processed()
+                log(f"  [{identifier}] All repos done — marked as processed")
             else:
-                log(f"  [{identifier}] NOT marking as processed — will retry failed repos next run")
+                # Move back to Ready for Development so next scan retries the failed repos
+                transition_issue(issue, "started", state_name="Ready for Development")
+                log(f"  [{identifier}] Moved back to Ready for Development — will retry {', '.join(failed_repos)} next run")
         else:
-            log(f"No PRs created for {identifier} — will retry next run")
+            # Move back to Ready for Development so next scan retries
+            transition_issue(issue, "started", state_name="Ready for Development")
+            log(f"No PRs created for {identifier} — moved back to Ready for Development")
     except Exception as err:
-        log(f"Error: {identifier}: {err} — will retry next run")
+        # Move back to Ready for Development on unexpected errors
+        try:
+            transition_issue(issue, "started", state_name="Ready for Development")
+        except Exception:
+            pass
+        log(f"Error: {identifier}: {err} — moved back to Ready for Development")
 
 
 # ── Main Processing Loop (3-phase) ──────────────────────────────────────────
