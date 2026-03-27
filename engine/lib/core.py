@@ -347,6 +347,12 @@ def _run_claude(identifier: str, prompt_file: str, log_file: str, worktree_path:
         output = result.stdout.strip()
         with open(log_file, "a") as f:
             f.write(f"\n{'='*60}\n{phase}\n{'='*60}\n{output}\n")
+
+        # Detect max-turns exhaustion — Claude returns exit 0 but work is incomplete
+        if "Reached max turns" in output:
+            log(f"Claude Code {phase} hit max turns for {identifier} — treating as failure")
+            return False
+
         log(f"Claude Code {phase} finished for {identifier}")
         return True
     except subprocess.CalledProcessError as err:
@@ -510,7 +516,7 @@ def push_and_create_pr(
 
     pr_title = f"{identifier}: {title}"
 
-    # Create PR via gh CLI, fall back to manual URL if gh fails
+    # Create PR via gh CLI
     try:
         pr_url = shell(
             f'gh pr create --repo "{gh_repo}" --base "{TARGET_BRANCH}" '
@@ -521,10 +527,9 @@ def push_and_create_pr(
         return pr_url
     except Exception as err:
         log(f"gh pr create failed for {identifier} on {gh_repo}: {err}")
-        # Fallback: construct manual PR URL
         fallback_url = f"https://github.com/{gh_repo}/compare/{TARGET_BRANCH}...{branch_name}?expand=1"
-        log(f"Fallback PR URL: {fallback_url}")
-        return fallback_url
+        log(f"Branch pushed but PR creation failed. Manual URL: {fallback_url}")
+        return None
 
 
 # ── Linear Updates ───────────────────────────────────────────────────────────
@@ -616,6 +621,7 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
 
         # Process repos in parallel — worktrees are fully isolated
         max_workers = min(len(repo_entries), MAX_CONCURRENT_REPOS)
+        failed_repos: list[str] = []
         log(f"  [{identifier}] Processing {len(repo_entries)} repo(s) with {max_workers} worker(s)...")
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -631,17 +637,30 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
                         pr_urls.append(pr_url)
                     if repo_summary:
                         repo_summaries.append(repo_summary)
+                    if not pr_url:
+                        failed_repos.append(repo_name)
                 except Exception as err:
                     log(f"  [{identifier}] Error on repo {repo_name}: {err}")
+                    failed_repos.append(repo_name)
 
         if pr_urls:
-            transition_issue(issue, "started", state_name="Code Review")
+            # Only move to Code Review if ALL repos succeeded
+            if not failed_repos:
+                transition_issue(issue, "started", state_name="Code Review")
+            else:
+                log(f"  [{identifier}] Partial success — {len(failed_repos)} repo(s) failed: {', '.join(failed_repos)}")
 
             # Build ticket comment
             branch_name = f"claude/{identifier.lower()}"
-            comment_parts = [
-                "Development complete. Branch and PR created automatically.\n",
-            ]
+            comment_parts = []
+
+            if failed_repos:
+                comment_parts.append(
+                    f"Partial completion. {len(pr_urls)} PR(s) created, "
+                    f"{len(failed_repos)} repo(s) failed: {', '.join(f'`{r}`' for r in failed_repos)}\n"
+                )
+            else:
+                comment_parts.append("Development complete. Branch and PR created automatically.\n")
 
             # Branch and PR info
             for i, url in enumerate(pr_urls):
@@ -678,13 +697,21 @@ def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: li
                 for change in all_env_changes:
                     comment_parts.append(change)
 
-            comment_parts.append("\nChanges were committed and pushed. The ticket has been moved to Code Review.")
+            if failed_repos:
+                comment_parts.append(f"\nTicket NOT marked as done — {len(failed_repos)} repo(s) need retry.")
+            else:
+                comment_parts.append("\nChanges were committed and pushed. The ticket has been moved to Code Review.")
             comment_on_issue(issue["id"], "\n".join(comment_parts))
 
             log(f"Done: {identifier} -> {', '.join(pr_urls)}")
-            with _processed_lock:
-                processed_issues.add(issue["id"])
-            save_processed()
+
+            # Only mark as processed if ALL repos succeeded
+            if not failed_repos:
+                with _processed_lock:
+                    processed_issues.add(issue["id"])
+                save_processed()
+            else:
+                log(f"  [{identifier}] NOT marking as processed — will retry failed repos next run")
         else:
             log(f"No PRs created for {identifier} — will retry next run")
     except Exception as err:
