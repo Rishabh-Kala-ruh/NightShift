@@ -75,13 +75,13 @@ class LinearClient:
 
     def get_issues_with_labels(self, team_id: str, assignee_id: str, first: int = 20) -> list[dict[str, Any]]:
         """Batch query: fetches issues with labels and project name inline (fewer API calls).
-        Filters for 'Ready for Development' state name, falling back to unstarted/started types."""
+        Filters for 'READY FOR DEVELOPMENT' state name, falling back to unstarted/started types."""
         query = """
         query($teamId: ID!, $assigneeId: ID!, $first: Int!) {
           issues(
             filter: {
               team: { id: { eq: $teamId } }
-              state: { name: { eqIgnoreCase: "Ready for Development" } }
+              state: { name: { eqIgnoreCase: "READY FOR DEVELOPMENT" } }
               assignee: { id: { eq: $assigneeId } }
             }
             first: $first
