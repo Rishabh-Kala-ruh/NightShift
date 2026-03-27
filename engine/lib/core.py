@@ -456,13 +456,7 @@ def push_and_create_pr(
         log(f"Claude Code unable to fix {identifier}")
         return None
 
-    # Delete old remote branch if it exists, then push fresh
     log(f"Pushing {branch_name}...")
-    try:
-        shell(f'git push origin --delete "{branch_name}"', cwd=worktree_path)
-        log(f"Deleted old remote branch {branch_name}")
-    except Exception:
-        pass  # Branch doesn't exist remotely — that's fine
     shell(f'git push origin "{branch_name}"', cwd=worktree_path)
 
     remote_url = shell("git remote get-url origin", cwd=worktree_path)
