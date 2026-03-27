@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from skills.ticket_enricher import EnrichedContext
 
@@ -181,6 +182,53 @@ class SentinelTestGenerator:
             return FRONTEND_SKILLS
         return BACKEND_SKILLS
 
+    # ── Smart Skill Selection ────────────────────────────────────────────
+
+    # Keywords in file paths/descriptions that trigger specialized test layers
+    _SKILL_TRIGGERS: dict[str, list[str]] = {
+        "contract-tests": ["api/", "routes/", "endpoint", "openapi", "schema", "swagger", "graphql"],
+        "security-tests": ["auth", "permission", "middleware", "token", "session", "password", "rbac", "oauth", "jwt"],
+        "resilience-tests": ["retry", "timeout", "circuit", "fallback", "client/", "http", "grpc", "queue"],
+        "smoke-tests": ["health", "startup", "config", "bootstrap", "main.py", "app.py", "index.ts"],
+        "e2e-api-tests": ["api/", "routes/", "endpoint", "handler", "controller", "view"],
+        "e2e-browser-tests": ["page", "component", "view", "screen", "layout", "modal"],
+    }
+
+    def select_skills_for_changes(
+        self, base_chain: list[str], file_changes: list[Any], repo_name: str,
+    ) -> list[str]:
+        """
+        Pick only the Sentinel skills relevant to the actual code changes.
+
+        Always includes: test-setup, unit-tests, test-review (core skills).
+        Specialized skills (contract, security, resilience, etc.) only included
+        if the changed files/descriptions match their trigger keywords.
+        """
+        # Core skills — always needed
+        always_include = {"test-setup", "unit-tests", "integration-tests", "test-review"}
+        selected = set(always_include)
+
+        # Collect all file paths and descriptions for this repo
+        search_text_parts: list[str] = []
+        for fc in file_changes:
+            if hasattr(fc, "repo") and fc.repo and fc.repo != repo_name:
+                continue
+            if hasattr(fc, "file"):
+                search_text_parts.append(fc.file.lower())
+            if hasattr(fc, "description"):
+                search_text_parts.append(fc.description.lower())
+            if hasattr(fc, "function"):
+                search_text_parts.append(fc.function.lower())
+        search_text = " ".join(search_text_parts)
+
+        # Check triggers for specialized skills
+        for skill_name, keywords in self._SKILL_TRIGGERS.items():
+            if skill_name in base_chain and any(kw in search_text for kw in keywords):
+                selected.add(skill_name)
+
+        # Preserve the original ordering from the chain
+        return [s for s in base_chain if s in selected]
+
     # ── Single Prompt Builder (recommended) ─────────────────────────────
 
     def build_single_test_prompt(
@@ -188,18 +236,27 @@ class SentinelTestGenerator:
         context: EnrichedContext,
         worktree_path: str,
         repo_name: str,
+        pathfinder: Any | None = None,
     ) -> str | None:
         """
-        Build ONE comprehensive test prompt with all relevant Sentinel skills.
-        The Test Agent handles sequencing internally (unit → integration → security, etc.)
+        Build ONE test prompt scoped to the ticket's actual code changes.
+
+        If Pathfinder analysis is available, only loads Sentinel skills relevant
+        to the files being changed. Otherwise falls back to the full skill chain.
 
         Returns None if no skills could be loaded.
         """
-        chain = self.get_skill_chain(worktree_path)
+        base_chain = self.get_skill_chain(worktree_path)
         available = set(self.get_available_skills())
         stack = self.detect_stack(worktree_path)
 
-        # Load all relevant skills
+        # Smart skill selection: pick only relevant skills based on code changes
+        if pathfinder and hasattr(pathfinder, "file_changes") and pathfinder.file_changes:
+            chain = self.select_skills_for_changes(base_chain, pathfinder.file_changes, repo_name)
+        else:
+            chain = base_chain
+
+        # Load selected skills
         loaded_skills: list[SentinelSkill] = []
         for skill_name in chain:
             if skill_name not in available:
@@ -228,12 +285,23 @@ class SentinelTestGenerator:
         sections.append(f"**Stack:** {stack}")
         sections.append(f"**Test layers to generate:** {', '.join(s.name for s in loaded_skills)}")
 
+        # ── Scope: what exactly to test (from Pathfinder)
+        if pathfinder and hasattr(pathfinder, "file_changes") and pathfinder.file_changes:
+            repo_changes = [fc for fc in pathfinder.file_changes if not fc.repo or fc.repo == repo_name]
+            if repo_changes:
+                sections.append(f"\n## Scope: Test ONLY These Changes")
+                sections.append(f"> Write tests specifically for these files and functions. Do NOT write tests for unrelated parts of the codebase.\n")
+                for fc in repo_changes:
+                    sections.append(f"- **{fc.change_type}** `{fc.file}` → `{fc.function}` — {fc.description}")
+                sections.append("")
+
         # ── Ticket context
         sections.append(f"\n{ticket_ctx}")
 
-        # ── All Sentinel skills (concatenated)
+        # ── Selected Sentinel skills (only relevant ones)
         sections.append(f"\n---\n# Sentinel Guardian Testing Methodology")
-        sections.append(f"Follow these skills IN ORDER. Generate tests for each applicable layer.\n")
+        sections.append(f"Follow these skills IN ORDER. Generate tests for each applicable layer.")
+        sections.append(f"**IMPORTANT:** Only test the specific changes listed above, not the entire codebase.\n")
 
         for skill in loaded_skills:
             sections.append(f"\n{'='*60}")
@@ -247,14 +315,15 @@ class SentinelTestGenerator:
 ## CRITICAL RULES
 
 1. **ONLY write tests.** Do NOT implement the fix/feature. Do NOT modify source code.
-2. **Every acceptance criterion** must have at least one corresponding test.
-3. **Edge cases from comments** must be tested.
-4. **Follow the repo's existing test conventions** — same framework, directory structure, fixtures.
-5. **No catch-all test files** — tests go in module-aligned files.
-6. **Verify mock targets exist** before mocking them.
-7. **Commit all test files** with message: `test({context.id}): add tests for {context.title}`
-8. **Run the tests** after committing. They SHOULD fail (no implementation yet).
-9. Do NOT push. Do NOT create a PR. Just commit locally.
+2. **ONLY test the specific changes** from the Scope section above. Do NOT test unrelated functionality.
+3. **Every acceptance criterion** must have at least one corresponding test.
+4. **Edge cases from comments** must be tested.
+5. **Follow the repo's existing test conventions** — same framework, directory structure, fixtures.
+6. **No catch-all test files** — tests go in module-aligned files.
+7. **Verify mock targets exist** before mocking them.
+8. **Commit all test files** with message: `test({context.id}): add tests for {context.title}`
+9. **Run the tests** after committing. They SHOULD fail (no implementation yet).
+10. Do NOT push. Do NOT create a PR. Just commit locally.
 """)
 
         return "\n".join(sections)

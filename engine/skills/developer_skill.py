@@ -192,9 +192,11 @@ class DeveloperSkill:
             issue, labels, team_key, project_name, parent_info, pathfinder
         )
 
-        # Step 5: Detect stack and build Test Agent prompt (single session, all skills)
+        # Step 5: Detect stack and build Test Agent prompt (scoped to ticket changes)
         stack_type = self.sentinel.detect_stack(worktree_path)
-        test_prompt = self.sentinel.build_single_test_prompt(enriched, worktree_path, repo_name)
+        test_prompt = self.sentinel.build_single_test_prompt(
+            enriched, worktree_path, repo_name, pathfinder=pathfinder,
+        )
 
         if not test_prompt:
             raise RuntimeError(
