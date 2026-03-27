@@ -338,7 +338,7 @@ def _run_claude(identifier: str, prompt_file: str, log_file: str, worktree_path:
         result = subprocess.run(
             cmd, shell=True,
             capture_output=True, text=True,
-            cwd=worktree_path, timeout=900, env=env,
+            cwd=worktree_path, timeout=7200, env=env,
         )
         if result.returncode != 0:
             raise subprocess.CalledProcessError(
