@@ -128,6 +128,15 @@ def parse_pathfinder_comment(comments: list[dict]) -> PathfinderAnalysis | None:
                 if repo_name not in repos:
                     repos.append(repo_name)
 
+    # Format 5: compact inline format — "Repo: agent-platform-v2" or "Repos: a, b"
+    if not repos:
+        m = re.search(r"\bRepo(?:s)?:\s*([\w.,\s-]+?)(?:\.|$)", body, re.IGNORECASE)
+        if m:
+            for part in m.group(1).split(","):
+                repo_name = part.strip()
+                if repo_name and re.match(r"^[\w.-]+$", repo_name):
+                    repos.append(repo_name)
+
     if repos and not primary_repo:
         primary_repo = repos[0]
 
