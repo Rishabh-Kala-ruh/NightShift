@@ -14,9 +14,54 @@ echo "GITHUB_ORG=${GITHUB_ORG:-ruh-ai}"
 echo "TARGET_BRANCH=${TARGET_BRANCH:-dev}"
 ```
 
-## Linear GraphQL API
+## Linear CLI Tool (Preferred)
 
-**Every** Linear operation uses this pattern. Use `curl` with the API key in the Authorization header:
+NightShift includes a Linear CLI tool at `skills/linear/scripts/linear.sh`. **Use this for all common Linear operations** instead of raw curl:
+
+```bash
+LINEAR="skills/linear/scripts/linear.sh"
+
+# My stuff
+$LINEAR my-issues                           # Your assigned issues
+$LINEAR my-todos                            # Just Todo items
+$LINEAR urgent                              # Urgent/High priority across team
+
+# Browse
+$LINEAR teams                               # List available teams
+$LINEAR team TT                             # All issues for a team
+$LINEAR issue TT-255                        # Get issue details
+$LINEAR branch TT-255                       # Get branch name for GitHub
+
+# Actions
+$LINEAR status TT-255 dev                   # Move to "In Development"
+$LINEAR status TT-255 code-review           # Move to "Code Review"
+$LINEAR status TT-255 ready-for-dev         # Move to "Ready for Development"
+$LINEAR status TT-255 done                  # Move to "Done"
+$LINEAR comment TT-255 "PR created: url"    # Add comment to ticket
+$LINEAR create TT "Title" "Description"     # Create new issue
+$LINEAR assign TT-255 "rishabh"             # Assign to user
+$LINEAR priority TT-255 high                # Set priority
+
+# Overview
+$LINEAR standup                             # Daily summary
+$LINEAR projects                            # All projects with progress
+```
+
+### Status Shortcuts
+
+| Shortcut | Maps to |
+|---|---|
+| `dev` or `progress` or `development` | In Development |
+| `code-review` or `review` | Code Review |
+| `ready` or `ready-for-dev` | Ready for Development |
+| `todo` | Todo |
+| `done` | Done |
+| `blocked` | Blocked |
+| `qa` | In QA |
+
+## Linear GraphQL API (for advanced operations)
+
+For operations not covered by the CLI tool (e.g., creating sub-issues, fetching children with assignees), use `curl` directly:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -127,12 +172,18 @@ mutation($teamId: String!, $parentId: String!, $title: String!, $description: St
 
 ### Phase 1: COLLECT
 
-1. Authenticate: call `{ viewer { id name email } }` — get your `viewer_id`
-2. Get all teams: `{ teams { nodes { id name key } } }`
-3. For each team, fetch eligible tickets using the query above
-4. Exclude tickets with labels `claude-processing` or `claude-done`
-5. Sort by priority: Urgent (1) > High (2) > Medium (3) > Low (4) > None (0)
-6. Log: `"Eligible tickets (N): TICKET-1(High), TICKET-2(Medium)"`
+```bash
+LINEAR="skills/linear/scripts/linear.sh"
+
+# List eligible tickets
+$LINEAR my-issues
+
+# Or get all team issues
+$LINEAR teams              # discover team keys
+$LINEAR team TT            # all active issues for TT team
+```
+
+Filter for "Ready for Development" state. Sort by priority: Urgent > High > Medium > Low.
 
 If no eligible tickets: log `"No eligible tickets found."` and stop.
 
@@ -170,7 +221,9 @@ For each eligible ticket:
 For each ticket, in order:
 
 #### Step 1: Move to "In Development"
-Fetch team states, find "In Development" (or type "started"), transition the issue.
+```bash
+$LINEAR status TT-255 dev
+```
 
 #### Step 2: Test Agent
 In the worktree directory, write comprehensive tests:
@@ -229,17 +282,30 @@ Capture the PR URL from gh output.
 
 **THIS IS CRITICAL. Always post a comment on the Linear ticket after creating PRs.**
 
-Build a comment with:
-- Branch name
-- PR URL(s)
-- Commit messages
-- Files changed
-- Environment changes (if any .env files or new env vars detected)
+```bash
+# Build the comment text with PR link, commits, files changed
+COMMENT="Development complete. Branch and PR created automatically.
 
-Use the `commentCreate` mutation to post it.
+**Branch:** \`$BRANCH\`
+**PR:** $PR_URL
+
+### Changes Summary
+$(git log --format='- %s' origin/${TARGET_BRANCH:-dev}..HEAD)
+
+**Files changed:**
+$(git diff origin/${TARGET_BRANCH:-dev}..HEAD --name-only | sed 's/^/- `/' | sed 's/$/ `/')
+
+---
+*Processed by NightShift*"
+
+# Post it using the Linear CLI
+$LINEAR comment $TICKET_ID "$COMMENT"
+```
 
 #### Step 6: Move to "Code Review"
-Fetch team states, find "Code Review" state, transition the issue.
+```bash
+$LINEAR status $TICKET_ID code-review
+```
 
 #### Step 7: Clean up
 ```bash

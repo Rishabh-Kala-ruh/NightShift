@@ -512,7 +512,10 @@ NightShift/
 |   |-- pathfinder-reader/
 |   |-- test-generator/
 |   |-- implementer/
-|   '-- pr-creator/
+|   |-- pr-creator/
+|   '-- linear/              # Linear CLI tool (from ClawHub)
+|       |-- SKILL.md
+|       '-- scripts/linear.sh
 |-- commands/                # OpenClaw chat commands
 |   |-- scan.md
 |   |-- status.md
