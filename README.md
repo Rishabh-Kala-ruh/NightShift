@@ -17,10 +17,14 @@ NightShift processes Linear tickets end-to-end using Test-Driven Development wit
                              Posts comment with analysis
                              Moves to "Ready for Dev"  --->  Picks up ticket
                                                              Filters repos (LLM)
+                                                             Decomposes if L/XL (*)
                                                              Writes tests (Sentinel)
                                                              Implements fix (TDD)
                                                              Creates PR with summary
                                                              Moves to "Code Review"
+
+(*) Complex tickets (L/XL) are automatically broken into subtasks.
+    Each subtask gets its own test + implementation cycle.
 ```
 
 ---
@@ -75,11 +79,44 @@ For each ticket:
   |     |-- Acceptance criteria (parsed from description)
   |     '-- File hints (extracted from description + comments)
   |
+  |-- Decompose complex tickets (task_decomposer.py):
+  |     |-- Triggered when Pathfinder complexity is L or XL
+  |     |-- Skipped if ticket already has children (no re-decomposition)
+  |     |-- Calls Claude CLI (max-turns 3, 60s timeout) to analyze
+  |     |     Pathfinder and propose 2-7 focused subtasks
+  |     |-- Creates subtasks in Linear as children of parent ticket
+  |     |-- Transitions each subtask to "Ready for Development"
+  |     |-- Comments on parent with subtask list
+  |     |-- Parent marked as processed; subtasks queued for execution
+  |     '-- On failure: falls back to processing parent as single task
+  |
   '-- Clone/update all unique repos in parallel (up to 4 workers)
         |-- Check REPO_MAP first, then auto-clone from GitHub
         |-- Pull latest from TARGET_BRANCH (dev/main/master)
         '-- Create isolated git worktree: .worktrees/claude/{ticket-id}
 ```
+
+#### Task Decomposition (L/XL Tickets)
+
+When Pathfinder marks a ticket as **L** or **XL** complexity, NightShift automatically decomposes it into smaller subtasks before processing. This prevents single Claude Code sessions from hitting max-turns or timeout limits on large tasks.
+
+```
+Parent Ticket (XL) ---- "Rebuild the authentication system"
+  |
+  | Claude CLI analyzes Pathfinder code changes table
+  | and proposes focused subtasks
+  |
+  +-- Subtask 1: [1/4] Add JWT token validation schema
+  |     '-- Own Test Agent (30 turns) + Dev Agent (30 turns) + PR
+  +-- Subtask 2: [2/4] Update session middleware
+  |     '-- Own Test Agent (30 turns) + Dev Agent (30 turns) + PR
+  +-- Subtask 3: [3/4] Migrate user model to new auth flow
+  |     '-- Own Test Agent (30 turns) + Dev Agent (30 turns) + PR
+  '-- Subtask 4: [4/4] Update API endpoints for new auth
+        '-- Own Test Agent (30 turns) + Dev Agent (30 turns) + PR
+```
+
+**Error handling:** Every failure path falls back to processing the parent as a single task. If a subtask fails during execution, it is moved back to "Ready for Development" and retried on the next scan.
 
 ### Phase 3: SCOPE
 
@@ -232,48 +269,52 @@ After all repos complete:
 +-------------------------------------------------------------------+
 |                       NightShift Pipeline                         |
 |                                                                   |
-|  +-----------+   +------------+   +---------+                     |
-|  |  COLLECT  |-->|  PREPARE   |-->|  SCOPE  |--+                  |
-|  |           |   |            |   |         |  |                  |
-|  | Linear    |   | Pathfinder |   | normal/ |  |                  |
-|  | tickets   |   | parse +   |   | parent/ |  |                  |
-|  | sorted by |   | LLM repo  |   | subtask |  |                  |
-|  | priority  |   | filter +  |   |         |  |                  |
-|  +-----------+   | clone     |   +---------+  |                  |
-|                  +------------+                |                  |
-|                                                |                  |
-|                          +---------------------+                  |
-|                          |                                        |
-|                          v                                        |
-|              +-----------+-----------+                             |
-|              | Per Repo (parallel)   |                             |
-|              |                       |                             |
-|              |  +------------------+ |                             |
-|              |  |   TEST AGENT     | |   Max 30 turns             |
-|              |  |   (Sentinel)     | |   15 min timeout           |
-|              |  +--------+---------+ |                             |
-|              |           |           |                             |
-|              |  +--------v---------+ |                             |
-|              |  |   DEV AGENT      | |   Max 30 turns             |
-|              |  |   (TDD impl)     | |   15 min timeout           |
-|              |  +--------+---------+ |                             |
-|              |           |           |                             |
-|              |  +--------v---------+ |                             |
-|              |  | SUMMARY + PUSH   | |   Commits, diff stats,    |
-|              |  | + CREATE PR      | |   env change detection    |
-|              |  +------------------+ |                             |
-|              +-----------+-----------+                             |
-|                          |                                        |
-|              +-----------v-----------+                             |
-|              | Update Linear ticket  |                             |
-|              | Branch + PR + Summary |                             |
-|              | Move to Code Review   |                             |
-|              +-----------------------+                             |
+|  +-----------+   +------------+   +-------------+   +---------+  |
+|  |  COLLECT  |-->|  PREPARE   |-->|  DECOMPOSE  |-->|  SCOPE  |--+
+|  |           |   |            |   | (L/XL only) |   |         |  |
+|  | Linear    |   | Pathfinder |   |             |   | normal/ |  |
+|  | tickets   |   | parse +   |   | Claude CLI  |   | parent/ |  |
+|  | sorted by |   | LLM repo  |   | breaks into |   | subtask |  |
+|  | priority  |   | filter +  |   | 2-7 subtasks|   |         |  |
+|  +-----------+   | clone     |   | in Linear   |   +---------+  |
+|                  +------------+   +-------------+        |       |
+|                                                          |       |
+|                          +-------------------------------+       |
+|                          |                                       |
+|                          v                                       |
+|              +-----------+-----------+                            |
+|              | Per Repo (parallel)   |                            |
+|              |                       |                            |
+|              |  +------------------+ |                            |
+|              |  |   TEST AGENT     | |   Max 30 turns            |
+|              |  |   (Sentinel)     | |   15 min timeout          |
+|              |  +--------+---------+ |                            |
+|              |           |           |                            |
+|              |  +--------v---------+ |                            |
+|              |  |   DEV AGENT      | |   Max 30 turns            |
+|              |  |   (TDD impl)     | |   15 min timeout          |
+|              |  +--------+---------+ |                            |
+|              |           |           |                            |
+|              |  +--------v---------+ |                            |
+|              |  | SUMMARY + PUSH   | |   Commits, diff stats,   |
+|              |  | + CREATE PR      | |   env change detection   |
+|              |  +------------------+ |                            |
+|              +-----------+-----------+                            |
+|                          |                                       |
+|              +-----------v-----------+                            |
+|              | Update Linear ticket  |                            |
+|              | Branch + PR + Summary |                            |
+|              | Move to Code Review   |                            |
+|              +-----------------------+                            |
 +-------------------------------------------------------------------+
 
 Concurrency:
   Tickets  --->  ThreadPoolExecutor (MAX_CONCURRENT_TICKETS, default: 2)
   Repos    --->  ThreadPoolExecutor (MAX_CONCURRENT_REPOS, default: 3)
+
+Complexity handling:
+  S/M tickets  --->  Processed directly (single Test + Dev session)
+  L/XL tickets --->  Decomposed into subtasks, each processed individually
 ```
 
 ### Ticket Lifecycle
@@ -287,11 +328,22 @@ Concurrency:
        v
   Ready for Development  <-- NightShift picks up here
        |
-       v
-  In Progress            <-- NightShift moves here when starting
+       +-- Complexity S/M: process directly
+       |         |
+       |         v
+       |    In Development    <-- NightShift moves here when starting
+       |         |
+       |         v
+       |    Code Review       <-- NightShift moves here when PR is created
        |
-       v
-  Code Review            <-- NightShift moves here when PR is created
+       +-- Complexity L/XL: decompose first
+                 |
+                 v
+            In Development    <-- Parent moved here
+                 |
+                 +-- Subtask 1 --> Ready for Dev --> In Dev --> Code Review
+                 +-- Subtask 2 --> Ready for Dev --> In Dev --> Code Review
+                 '-- Subtask N --> Ready for Dev --> In Dev --> Code Review
        |
        v
   Ready to Deploy - DEV  <-- After human review approval
@@ -307,8 +359,9 @@ Concurrency:
 ### Core Orchestrator (`engine/lib/core.py`)
 Three-phase processing engine with parallel execution:
 - **Phase 1 (COLLECT):** Fetch, filter, sort tickets by priority
-- **Phase 2 (PREPARE):** Parse Pathfinder, LLM-filter repos, clone in parallel
+- **Phase 2 (PREPARE):** Parse Pathfinder, LLM-filter repos, decompose L/XL tickets, clone in parallel
 - **Phase 3 (EXECUTE):** Process tickets in parallel, repos in parallel within each ticket
+- **Task Decomposition:** L/XL tickets are broken into subtasks and queued for individual processing
 - **Change Summary:** Extracts commit messages, diff stats, detects env changes
 - **PR Creation:** Structured PR body with summary, changes, acceptance criteria, env changes
 - **`gh` Fallback:** Returns manual compare URL when `gh pr create` fails
@@ -318,6 +371,7 @@ GraphQL API client for all Linear operations:
 - Fetch viewer, teams, issues (with labels, project, state)
 - Issue state transitions, comment creation
 - Children/parent fetching (with assignees for scope resolution)
+- Sub-issue creation (for task decomposition)
 - Relations, attachments
 
 ### Developer Skill (`engine/skills/developer_skill.py`)
@@ -349,6 +403,13 @@ Extracts structured data from Pathfinder analysis comments:
 - Affected repos with contextual notes per repo
 - Code changes table (repo, file, function, change type, description)
 - Implementation order, file hints
+
+### Task Decomposer (`engine/skills/task_decomposer.py`)
+Automatically breaks complex tickets (L/XL) into focused subtasks before processing:
+- **Gate check:** Only triggers when Pathfinder complexity is L or XL AND ticket has no existing children
+- **Decomposition:** Lightweight Claude CLI call (max-turns 3, 60s timeout) analyzes Pathfinder code changes table and proposes 2-7 independently implementable subtasks
+- **Creation:** Creates subtasks in Linear as children, assigns to bot, transitions to "Ready for Development"
+- **Error handling:** Every failure path falls back to processing the parent as a single task. Subtasks that fail during execution are moved back to "Ready for Development" for retry on next scan
 
 ### LLM Repo Filter (`engine/skills/repo_filter.py`)
 Lightweight Claude CLI call (max-turns 2, 30s timeout) that reads the Pathfinder analysis and determines which repos actually need code changes. Uses semantic understanding, not string matching. Falls back to full list on failure. Skipped if only 1 repo.
@@ -469,6 +530,7 @@ NightShift/
 |   |   |   '-- SKILL.md             # TDD workflow instructions
 |   |   |-- ticket_enricher.py       # Deep ticket context (7 parallel API calls)
 |   |   |-- developer_skill.py       # Scope resolution + prompt building
+|   |   |-- task_decomposer.py       # L/XL task decomposition into subtasks
 |   |   |-- sentinel_integration.py  # Sentinel skill loading + stack detection
 |   |   |-- pathfinder_parser.py     # Pathfinder comment parser
 |   |   '-- repo_filter.py           # LLM-based repo filtering

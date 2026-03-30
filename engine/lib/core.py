@@ -27,6 +27,7 @@ from lib.config import (
 from lib.linear_client import LinearClient
 from skills.developer_skill import DeveloperSkill, DeveloperResult
 from skills.ticket_enricher import parse_acceptance_criteria
+from skills.task_decomposer import should_decompose, decompose_and_create_subtasks
 
 
 # ── Types ────────────────────────────────────────────────────────────────────
@@ -826,7 +827,7 @@ def process_tickets() -> None:
 
         # ── Phase 2: PREPARE — detect repos (with Pathfinder) and clone in parallel ──
 
-        from skills.pathfinder_parser import parse_pathfinder_comment
+        from skills.pathfinder_parser import parse_pathfinder_comment, PathfinderAnalysis
         from skills.repo_filter import filter_repos
 
         all_repo_entries: dict[str, RepoEntry] = {}  # repo_name -> entry (deduplicated)
@@ -838,6 +839,7 @@ def process_tickets() -> None:
 
             # Try Pathfinder comment first for repo detection
             entries: list[RepoEntry] = []
+            pf: PathfinderAnalysis | None = None
             try:
                 comments = linear.get_issue_comments(issue["id"])
                 pf = parse_pathfinder_comment(comments)
@@ -858,6 +860,54 @@ def process_tickets() -> None:
             # Fallback to standard detection
             if not entries:
                 entries = detect_repos(issue, labels, team_key, project_name)
+
+            # ── Decompose complex tickets (L/XL) into subtasks ──
+            if should_decompose(pf, issue, linear):
+                team_id = (issue.get("team") or {}).get("id") or linear.get_issue_team_id(issue["id"])
+                if team_id:
+                    created_subtasks = decompose_and_create_subtasks(
+                        issue, pf, linear, team_id, me["id"],
+                    )
+                    if created_subtasks:
+                        # Move parent to "In Progress" — subtasks will be processed individually
+                        transition_issue(issue, "started", state_name="In Development")
+                        log(f"  [{issue['identifier']}] Decomposed into {len(created_subtasks)} subtasks — processing subtasks instead")
+
+                        # Fetch all team issues once (to find full subtask data)
+                        all_team_issues: list[dict[str, Any]] = []
+                        try:
+                            all_team_issues = linear.get_issues_with_labels(team_id, me["id"], first=50)
+                        except Exception:
+                            pass
+                        sub_lookup = {i["id"]: i for i in all_team_issues}
+
+                        # Replace parent with its subtasks in the processing queue
+                        for sub in created_subtasks:
+                            sub_issue = sub_lookup.get(sub["id"])
+                            if not sub_issue:
+                                # Build minimal issue dict from creation response
+                                sub_issue = {
+                                    "id": sub["id"],
+                                    "identifier": sub["identifier"],
+                                    "title": sub["title"],
+                                    "description": "",
+                                    "url": sub.get("url", issue["url"]),
+                                    "priority": issue.get("priority", 0),
+                                    "labels": {"nodes": []},
+                                    "project": issue.get("project"),
+                                    "team": issue.get("team") or {"id": team_id},
+                                    "state": sub.get("state", {"name": "Backlog", "type": "unstarted"}),
+                                }
+                            issue_repos.append((sub_issue, team_key, entries))
+                            for entry in entries:
+                                if entry.name.lower() not in all_repo_entries:
+                                    all_repo_entries[entry.name.lower()] = entry
+
+                        # Mark parent as processed so we don't re-pick it up
+                        with _processed_lock:
+                            processed_issues.add(issue["id"])
+                        save_processed()
+                        continue  # Skip adding the parent to issue_repos
 
             issue_repos.append((issue, team_key, entries))
             for entry in entries:
