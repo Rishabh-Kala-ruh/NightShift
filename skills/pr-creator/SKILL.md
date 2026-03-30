@@ -1,118 +1,163 @@
 ---
 name: pr-creator
-description: Commit, push branch, create PR via GitHub CLI, and update ticket with branch/PR info
+description: Push branch, create PR via GitHub CLI, comment on Linear ticket, and transition to Code Review
 ---
 
 # PR Creator
 
-Handles the final steps after implementation: committing changes, pushing the branch, creating a pull request, and updating the ticket.
+Handles the final steps after implementation: push, PR, Linear comment, state transition.
 
-## Commit Format
+## How to Execute
+
+### Step 1: Verify Changes Exist
 
 ```bash
-cd <working_dir>
-
-git add -A
-
-# Commit message format:
-# <TICKET-ID>: <ticket title>
-#
-# <short description of what was changed and why>
-#
-# Resolves: <TICKET-ID>
-git commit -m "<TICKET-ID>: <ticket title>
-
-<2-3 sentence summary of changes made>
-
-Resolves: <TICKET-ID>"
+cd "$WORKTREE"
+git diff HEAD~1 --stat
 ```
 
-## Push the Branch
+If no changes/commits, stop — nothing to ship.
+
+Check for `CLAUDE_UNABLE.md` — if it exists, the agent couldn't fix the issue. Note this on the ticket and stop.
+
+### Step 2: Push the Branch
 
 ```bash
-git push origin "$BRANCH_NAME"
+BRANCH="claude/$(echo $TICKET_ID | tr '[:upper:]' '[:lower:]')"
+git push origin "$BRANCH"
 ```
 
-If push fails due to authentication, inform the user and stop -- do not attempt to configure credentials.
+If push fails due to auth, stop and inform the user.
 
-## Create a GitHub Pull Request
-
-Use the GitHub CLI (`gh`) to create the PR:
+### Step 3: Create GitHub PR
 
 ```bash
+# Detect the GitHub repo from remote URL
+REMOTE_URL=$(git remote get-url origin)
+GH_REPO=$(echo "$REMOTE_URL" | sed -E 's/.*[:/]([^/]+\/[^/]+?)(\.git)?$/\1/')
+
+# Get commit messages for PR body
+COMMITS=$(git log --format="- %s" origin/${TARGET_BRANCH:-dev}..HEAD)
+FILES=$(git diff origin/${TARGET_BRANCH:-dev}..HEAD --name-only)
+DIFF_STAT=$(git diff origin/${TARGET_BRANCH:-dev}..HEAD --stat)
+
 gh pr create \
-  --base dev \
-  --head "$BRANCH_NAME" \
-  --title "<TICKET-ID>: <ticket title>" \
-  --body "$(cat <<'EOF'
-## Summary
-<What this PR does, in 2-3 sentences>
+  --repo "$GH_REPO" \
+  --base "${TARGET_BRANCH:-dev}" \
+  --head "$BRANCH" \
+  --title "$TICKET_ID: $TITLE" \
+  --body "## Summary
+$COMMITS
 
 ## Ticket
-[<TICKET-ID>](<ticket-url>)
+[$TICKET_ID]($TICKET_URL)
 
 ## Changes Made
-<bullet list of files changed and what was done>
+$(echo "$FILES" | sed 's/^/- `/' | sed 's/$/`/')
 
-## Acceptance Criteria
-<paste the acceptance criteria from the ticket>
+\`\`\`
+$DIFF_STAT
+\`\`\`
 
-## Test Results
-<PASSED / FAILED WITH WARNINGS -- include error summary if warnings>
-EOF
-)"
+---
+*Automated by NightShift*"
 ```
 
-Capture the PR URL from the output.
-
-If `gh` is not installed or not authenticated, fall back to constructing the PR URL manually and tell the user to open it:
-
+Capture the PR URL from the output. If `gh` fails, construct manual URL:
 ```
-https://github.com/<org>/<repo>/compare/dev...<BRANCH_NAME>?expand=1
+https://github.com/$GH_REPO/compare/${TARGET_BRANCH:-dev}...$BRANCH?expand=1
 ```
 
-## Update Ticket
+### Step 4: Comment on Linear Ticket (CRITICAL)
 
-After PR creation:
+**You MUST always post a comment on the Linear ticket.** This is how the team knows what happened.
 
-- Transition the ticket to "Code Review" status
-- Add a comment to the ticket:
+```bash
+# Build comment body
+COMMENT="Development complete. Branch and PR created automatically.
 
-```
-Development complete. Branch and PR created automatically.
+**Branch:** \`$BRANCH\`
+**PR:** $PR_URL
 
-**Branch:** `<BRANCH_NAME>`
-**PR:** <PR_URL>
-
-Changes were committed and pushed. The ticket has been moved to Code Review.
-```
-
-## Final Output
-
-After completing all steps, summarize what was done:
-
-```
-Done! Here's what happened for <TICKET-ID>:
+### Changes Summary
+$COMMITS
 
 **Files changed:**
-- path/to/file1.ts
-- path/to/file2.ts
+$(echo "$FILES" | sed 's/^/- \`/' | sed 's/$/\`/')
+
+\`\`\`
+$DIFF_STAT
+\`\`\`
+
+---
+*Processed by NightShift*"
+
+# Post to Linear
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"query\": \"mutation(\$issueId: String!, \$body: String!) { commentCreate(input: { issueId: \$issueId, body: \$body }) { success } }\", \"variables\": {\"issueId\": \"$ISSUE_ID\", \"body\": $(echo "$COMMENT" | jq -Rs .)}}"
 ```
+
+### Step 5: Transition to "Code Review"
+
+```bash
+# Get team states
+STATES=$(curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"query\": \"query(\$id: String!) { team(id: \$id) { states { nodes { id name type } } } }\", \"variables\": {\"id\": \"$TEAM_ID\"}}")
+
+# Find "Code Review" state
+STATE_ID=$(echo "$STATES" | jq -r '.data.team.states.nodes[] | select(.name == "Code Review") | .id')
+
+# Transition
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"query\": \"mutation(\$id: String!, \$stateId: String!) { issueUpdate(id: \$id, input: { stateId: \$stateId }) { success } }\", \"variables\": {\"id\": \"$ISSUE_ID\", \"stateId\": \"$STATE_ID\"}}"
+```
+
+### Step 6: Clean Up Worktree
+
+```bash
+cd "$REPO_DIR"
+git worktree remove "$WORKTREE" --force 2>/dev/null || true
+```
+
+## If Multiple Repos Had PRs
+
+When a ticket spans multiple repos, the comment should include ALL PRs:
+
+```
+**PR (agent-platform-v2):** https://github.com/ruh-ai/agent-platform-v2/pull/367
+**PR (agent-gateway):** https://github.com/ruh-ai/agent-gateway/pull/236
+```
+
+## If a Repo Failed or Doesn't Exist
+
+Note it in the comment:
+```
+**agent-builder-service:** Repo does not exist on GitHub (404). Needs clarification.
+```
+
+And do NOT mark the ticket as fully complete — note partial completion.
 
 ## Error Handling
 
 | Situation | Action |
-|-----------|--------|
-| Ticket not found | Stop, tell user, ask for correct ID |
-| Branch already exists with commits | Ask user: reuse or abort |
-| Git push fails (auth) | Stop, tell user to check GitHub credentials |
-| `gh` not installed | Construct manual PR URL, tell user to open it |
-| Tests fail | Commit with warning, note in PR description |
-| Ticket transition not found | Skip transition, warn user, still add comment |
-| Working directory not a git repo | Stop, inform user |
+|---|---|
+| No changes to push | Skip this repo, move to next |
+| CLAUDE_UNABLE.md exists | Note on ticket, don't create PR |
+| Push fails (auth) | Stop, inform user |
+| `gh` not installed | Construct manual compare URL |
+| PR already exists for branch | Note it, don't create duplicate |
+| Linear comment fails | Log warning, continue (non-critical) |
+| State transition fails | Log warning, continue |
 
 ## Safety Rules
 
-- Never modify `.env`, secrets, credentials, or security-related config
+- Never modify `.env`, secrets, or credentials
 - Never force-push to `dev` or `main`
-- Always branch from `dev`, not from the current HEAD (unless they are the same)
+- Always branch from `dev` (or `main`/`master` if `dev` doesn't exist)
+- Never push directly to `dev` or `main` — always use PR

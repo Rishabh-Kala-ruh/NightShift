@@ -5,45 +5,37 @@ description: Run the full NightShift pipeline — scan Linear for eligible ticke
 
 # /scan
 
-Run the full NightShift pipeline.
+Run the full NightShift pipeline autonomously.
 
-## Usage
-```
-/scan
-```
+## What to Do
 
-## What It Does
+Execute the complete pipeline described in CLAUDE.md:
 
-1. Connects to Linear API
-2. Fetches tickets in "Ready for Development" assigned to you
-3. Sorts by priority (Urgent first)
-4. For each ticket:
-   - Parses Pathfinder RCA/TRD comment
-   - Clones/updates target repos
-   - Runs Test Agent (writes tests)
-   - Runs Dev Agent (implements fix)
-   - Creates PR to dev
-   - Moves ticket to "Code Review"
+1. **COLLECT** — Authenticate with Linear, fetch eligible tickets (Ready for Development, assigned to you), sort by priority
+2. **PREPARE** — For each ticket: fetch comments, parse Pathfinder analysis, detect repos, clone/update repos, create worktrees
+3. **EXECUTE** — For each ticket:
+   - Transition to "In Development"
+   - If complexity is L/XL and no children → decompose into subtasks first
+   - Test Agent: write tests, commit
+   - Dev Agent: implement fix until tests pass, commit
+   - Push branch, create PR via `gh`
+   - **Post comment on Linear ticket** with PR link, commits, files changed
+   - Transition to "Code Review"
 
-## Execution
+## Important
+
+- Do NOT skip the Linear comment step. Always post PR links and change summary on the ticket.
+- Do NOT skip the state transition. Always move to "In Development" when starting and "Code Review" when done.
+- If a repo fails, note it on the ticket and continue with other repos.
+- If all repos fail, move ticket back to "Ready for Development" for retry.
+
+## If Running on a Server with the Python Engine
 
 ```bash
-docker exec nightshift python3 engine/run_once.py
+cd ~/NightShift/engine
+python3 run_once.py
 ```
 
-## Expected Output
+## If Running via OpenClaw (this session)
 
-```
-=== Starting ticket scan ===
-Authenticated as: user@ruh.ai
-Sentinel Guardian: enabled (13 skills available)
-Scanning team: Ruh (RUH)
-Eligible tickets (2): RUH-384(High), RUH-385(Medium)
-[RUH-384] Pathfinder repos: ['agent-platform-v2']
-[RUH-384] Starting Test Agent...
-[RUH-384] Test Agent complete — tests committed.
-[RUH-384] Starting Dev Agent...
-[RUH-384] Dev Agent complete.
-Done: RUH-384 -> https://github.com/ruh-ai/agent-platform-v2/pull/42
-=== Scan complete ===
-```
+Execute the pipeline steps directly using bash (curl for Linear API, git for repos, gh for PRs). Follow the exact steps in CLAUDE.md.
