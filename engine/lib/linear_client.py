@@ -301,6 +301,54 @@ class LinearClient:
         data = self._gql(query, {"id": issue_id})
         return data["issue"].get("parent")
 
+    # ── create sub-issue ──────────────────────────────────────────────
+
+    def create_sub_issue(
+        self,
+        parent_id: str,
+        team_id: str,
+        title: str,
+        description: str,
+        assignee_id: str | None = None,
+        priority: int = 0,
+    ) -> dict[str, Any]:
+        """Create a sub-issue (child) under a parent issue in Linear."""
+        mutation = """
+        mutation($teamId: String!, $parentId: String!, $title: String!, $description: String!, $assigneeId: String, $priority: Int) {
+          issueCreate(input: {
+            teamId: $teamId
+            parentId: $parentId
+            title: $title
+            description: $description
+            assigneeId: $assigneeId
+            priority: $priority
+          }) {
+            success
+            issue {
+              id
+              identifier
+              title
+              url
+              state { name type }
+            }
+          }
+        }
+        """
+        variables: dict[str, Any] = {
+            "teamId": team_id,
+            "parentId": parent_id,
+            "title": title,
+            "description": description,
+            "priority": priority,
+        }
+        if assignee_id:
+            variables["assigneeId"] = assignee_id
+        data = self._gql(mutation, variables)
+        result = data["issueCreate"]
+        if not result.get("success"):
+            raise RuntimeError(f"Failed to create sub-issue: {title}")
+        return result["issue"]
+
     # ── relations ────────────────────────────────────────────────────
 
     def get_issue_relations(self, issue_id: str, first: int = 20) -> list[dict[str, Any]]:
