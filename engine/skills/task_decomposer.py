@@ -301,7 +301,7 @@ def decompose_and_create_subtasks(
                 f"**Parent ticket:** {identifier} — {issue['title']}\n\n"
                 f"{sub_def.description}\n\n"
                 f"---\n"
-                f"*Auto-decomposed from {identifier} (complexity: {pathfinder.complexity}) by NightShift*"
+                f"*Subtask {i}/{len(subtask_defs)} — auto-decomposed from {identifier} by NightShift*"
             )
 
             created_issue = client.create_sub_issue(
