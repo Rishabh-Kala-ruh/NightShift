@@ -22,7 +22,7 @@
                |               |
                v               v
           +---------+     +-----------+     +------------------+
-          | Move to |     | Test      |---->| Sentinel Skills  |
+          | Move to |     | Test      |---->| Test Generator   |
           | Ready   |     | Agent     |     | (unit, integ,    |
           | for Dev |     |           |     |  security, etc.) |
           +---------+     +-----------+     +------------------+
@@ -51,13 +51,13 @@ NightShift/
 |-- AGENTS.md                # Sub-agent definitions overview
 |
 |-- agents/                  # Sub-agent definitions (OpenClaw format)
-|   |-- test-agent.md        # Test Agent — writes tests via Sentinel
+|   |-- test-agent.md        # Test Agent — writes tests via built-in skill
 |   +-- dev-agent.md         # Dev Agent — implements fixes via TDD
 |
 |-- skills/                  # Skill definitions (OpenClaw format)
 |   |-- ticket-scanner/SKILL.md      # Fetch & filter Linear tickets
 |   |-- pathfinder-reader/SKILL.md   # Parse Pathfinder RCA/TRD comments
-|   |-- test-generator/SKILL.md      # Generate tests using Sentinel
+|   |-- test-generator/SKILL.md      # Built-in multi-layer test methodology
 |   |-- implementer/SKILL.md         # Implement fix using TDD
 |   +-- pr-creator/SKILL.md          # Push branch and create PR
 |
@@ -74,7 +74,7 @@ NightShift/
 |   |-- skills/              # Python skill implementations
 |   |   |-- ticket_enricher.py       # Deep ticket context extraction
 |   |   |-- developer_skill.py       # Scope resolution + prompt building
-|   |   |-- sentinel_integration.py  # Sentinel skill loading + stack detection
+|   |   |-- test_prompt_builder.py   # Test prompt building + stack detection
 |   |   +-- pathfinder_parser.py     # Pathfinder comment parser
 |   |-- main.py              # Continuous loop mode
 |   +-- run_once.py          # Single-scan mode
@@ -92,13 +92,12 @@ NightShift/
 ### Skills vs Agents
 - **Skills** are knowledge documents — they describe HOW to do something
 - **Agents** READ skills and DO the work
-- Test Agent reads Sentinel skills to know HOW to write tests, then writes them
+- Test Agent reads the test-generator skill to know HOW to write tests, then writes them
 - Dev Agent reads the developer skill to know HOW to implement, then implements
 
 ### Two Claude Code Sessions Per Repo
-- Test Agent: one session with ALL relevant Sentinel skills concatenated
+- Test Agent: one session with all relevant test layers from the built-in skill
 - Dev Agent: one session with Pathfinder RCA/TRD + developer skill instructions
-- This replaced the previous 10-session approach (one per Sentinel skill)
 
 ### Pathfinder as Primary Context
 - Pathfinder comments contain exact root cause analysis (bugs) or technical design (features)
@@ -107,6 +106,5 @@ NightShift/
 
 ### Docker-Based Execution
 - The Python engine runs inside a Docker container
-- Sentinel Guardian skills are mounted read-only from the host
 - Repos are cloned into persistent Docker volumes
 - Claude Code CLI runs inside the container with OAuth token auth

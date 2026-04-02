@@ -1,6 +1,7 @@
 ---
 name: check
 description: Check the processing status of a specific ticket
+tools: ["Bash", "Read"]
 ---
 
 # /check

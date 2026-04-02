@@ -136,6 +136,17 @@ mutation($issueId: String!, $body: String!) {
 }
 ```
 
+**Get issue children (subtasks):**
+```graphql
+query($id: String!, $first: Int!) {
+  issue(id: $id) {
+    children(first: $first) {
+      nodes { id identifier title description state { name } assignee { id name } }
+    }
+  }
+}
+```
+
 **Get issue parent:**
 ```graphql
 query($id: String!) {
@@ -162,7 +173,13 @@ $LINEAR team TT            # all active issues for TT team
 
 Filter for "Ready for Development" state. Sort by priority: Urgent > High > Medium > Low.
 
-If no eligible tickets: log `"No eligible tickets found."` and stop.
+**Subtask handling:** For each eligible ticket, check if it has children (subtasks created by Pathfinder). If it does:
+- Fetch the children and filter for "Ready for Development" state
+- Process each **subtask** individually (not the parent)
+- The parent provides context, subtasks are the actual work items
+- If a parent has subtasks but none are in "Ready for Development", skip it
+
+If no eligible tickets or subtasks: log `"No eligible tickets found."` and stop.
 
 ### Phase 2: PREPARE
 
@@ -206,7 +223,7 @@ $LINEAR status TT-255 dev
 In the worktree directory, write comprehensive tests:
 - Read the codebase and existing test patterns
 - Write tests covering: main behavior, each acceptance criterion, edge cases
-- Follow Sentinel Guardian methodology if skills are available
+- Write tests for all applicable layers based on the repo's stack (see test-generator skill)
 - Run tests — they should FAIL (implementation doesn't exist yet)
 - Commit: `TICKET-ID Add tests for <title>`
 
@@ -315,6 +332,27 @@ Development complete. Branch and PR created automatically.
 ```
 
 
+## Scope Rules
+
+Pathfinder creates subtasks for complex tickets. NightShift must respect scope boundaries:
+
+| Ticket Type | What to do |
+|---|---|
+| Normal (no children) | Implement everything in the ticket |
+| Parent with subtasks in "Ready for Dev" | Do NOT work on parent directly — process each subtask individually |
+| Subtask | Only implement THIS subtask's scope. Read parent for context but stay within bounds |
+| Parent with subtasks NOT in "Ready for Dev" | Skip — subtasks aren't ready yet |
+
+### Processing a Subtask
+
+1. Fetch the **parent ticket** for full context (description, Pathfinder analysis, acceptance criteria)
+2. Fetch the **subtask** for the specific scope of work
+3. The Pathfinder analysis lives on the **parent** — use it as primary context
+4. Only implement what the **subtask** describes — do NOT touch scope belonging to other subtasks
+5. Branch name: `claude/<subtask-id>` (e.g., `claude/tt-255`)
+6. PR title: `SUBTASK-ID <subtask title>`
+7. Comment on **both** the subtask AND the parent ticket
+
 ## Commit Message Convention
 
 **All commits MUST start with a ticket ID, conventional commit type, or release tag.** Enforced by git hooks in target repos.
@@ -348,7 +386,7 @@ Merge and revert commits are exempt.
 5. **Always comment on the ticket.** PR link, commits, files changed.
 6. **Always transition ticket state.** "In Development" when starting, "Code Review" when done.
 7. **Clean commits.** Test commit separate from implementation commit. Format: `TICKET-ID Message`.
-8. **Scope boundaries are sacred.** Never implement outside the ticket's scope.
+8. **Scope boundaries are sacred.** Never implement outside the ticket's scope. For subtasks, only implement what the subtask describes — not the parent or other subtasks.
 
 ## Error Handling
 
