@@ -61,7 +61,7 @@ $LINEAR projects                            # All projects with progress
 
 ## Linear GraphQL API (for advanced operations)
 
-For operations not covered by the CLI tool (e.g., creating sub-issues, fetching children with assignees), use `curl` directly:
+For operations not covered by the CLI tool (e.g., fetching parent issues with assignees), use `curl` directly:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -136,34 +136,11 @@ mutation($issueId: String!, $body: String!) {
 }
 ```
 
-**Get issue children:**
-```graphql
-query($id: String!, $first: Int!) {
-  issue(id: $id) {
-    children(first: $first) {
-      nodes { identifier title description state { name } assignee { id name } }
-    }
-  }
-}
-```
-
 **Get issue parent:**
 ```graphql
 query($id: String!) {
   issue(id: $id) {
     parent { id identifier title description labels { nodes { name } } project { name } team { id } }
-  }
-}
-```
-
-**Create sub-issue:**
-```graphql
-mutation($teamId: String!, $parentId: String!, $title: String!, $description: String!, $assigneeId: String, $priority: Int) {
-  issueCreate(input: {
-    teamId: $teamId, parentId: $parentId, title: $title, description: $description, assigneeId: $assigneeId, priority: $priority
-  }) {
-    success
-    issue { id identifier title url state { name type } }
   }
 }
 ```
@@ -337,27 +314,6 @@ Development complete. Branch and PR created automatically.
 *Processed by NightShift*
 ```
 
-## Task Decomposition (L/XL Tickets)
-
-When a ticket has Pathfinder complexity **L** or **XL** and has **no existing children**:
-
-1. Analyze the Pathfinder code changes table
-2. Group related changes into 2-7 focused subtasks
-3. Create subtasks in Linear using `issueCreate` with `parentId`
-4. Assign each subtask to yourself
-5. Transition each subtask to "Ready for Development"
-6. Comment on parent listing all subtasks
-7. Move parent to "In Development"
-8. Process each subtask individually (each gets its own test + impl + PR cycle)
-
-## Scope Rules
-
-| Ticket Type | What to do |
-|---|---|
-| Normal (no children) | Implement everything |
-| Parent with sub-tasks on OTHER devs | Only implement what's NOT covered by their sub-tasks |
-| Sub-task | Only implement THIS sub-task's scope, read parent for context |
-| L/XL complexity, no children | Decompose first, then process subtasks |
 
 ## Commit Message Convention
 
@@ -414,6 +370,5 @@ Merge and revert commits are exempt.
 | "scan" / "run" / "process tickets" | Execute the full pipeline above |
 | "check for ready for development" | List eligible tickets (Phase 1 only, don't process) |
 | "check TT-XXX" / "status of TT-XXX" | Fetch and display that ticket's details |
-| "create subtasks for TT-XXX" | Fetch ticket, decompose, create subtasks in Linear |
 | "move TT-XXX to <state>" | Transition the ticket |
 | "comment on TT-XXX" | Add a comment to the ticket |
