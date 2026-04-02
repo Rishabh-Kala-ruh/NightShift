@@ -1,6 +1,6 @@
 ---
 name: test-agent
-description: Generates comprehensive test suites for a ticket using Sentinel Guardian methodology. Detects repo stack, loads relevant testing skills, and writes all test layers in a single session.
+description: Generates comprehensive test suites for a ticket using the built-in test skill. Detects repo stack, selects relevant test layers, and writes all tests in a single session.
 tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
 model: sonnet
 ---
@@ -46,7 +46,7 @@ Before writing tests:
 
 ### Step 4: Generate Tests (All Layers)
 
-Write tests following the Sentinel Guardian testing methodology provided in your prompt. For each test layer:
+Write tests following the test-generator skill methodology provided in your prompt. For each test layer:
 
 **Backend repos — write in order:**
 1. **Unit Tests** — business logic in isolation, all I/O mocked
@@ -86,7 +86,7 @@ Tests SHOULD fail (since the implementation doesn't exist yet). If they all pass
 
 ```bash
 git add -A
-git commit -m "test(TICKET-ID): add tests for TICKET-TITLE"
+git commit -m "TICKET-ID Add tests for TICKET-TITLE"
 ```
 
 ## Critical Rules

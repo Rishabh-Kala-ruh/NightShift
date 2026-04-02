@@ -4,7 +4,7 @@
 
 | Agent | File | Purpose | Model |
 |-------|------|---------|-------|
-| **Test Agent** | `agents/test-agent.md` | Generates comprehensive test suites using Sentinel Guardian methodology | sonnet |
+| **Test Agent** | `agents/test-agent.md` | Generates comprehensive test suites for all applicable test layers | sonnet |
 | **Dev Agent** | `agents/dev-agent.md` | Implements fixes using TDD — makes tests pass without editing them | sonnet |
 
 ## Execution Order

@@ -64,6 +64,6 @@ docker exec nightshift git -C /app/repos/REPO branch -a
 
 Accessed via Python's `LinearClient` class (GraphQL). No CLI tool — all API calls are in the engine.
 
-## Sentinel Guardian
+## Test Generator
 
-Test skills mounted read-only at `/app/sentinel-skills/` inside the container. Skills come from the host at `~/.openclaw/workspace/sentinel-guardian/skills/`.
+Built-in test skill at `skills/test-generator/SKILL.md`. No external dependency — test methodology is self-contained in the repo.

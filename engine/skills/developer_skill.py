@@ -5,17 +5,17 @@ Sits between ticket fetching and Claude Code execution.
 Handles scope resolution, repo inheritance, and smart prompt building
 for all cases: normal tickets, parent tickets with sub-tasks, and sub-tasks.
 
-Multi-phase TDD flow (Sentinel is REQUIRED):
-  Phase 1..N: Sentinel Guardian generates tests sequentially (one skill per phase)
-  Final Phase: Developer implements the fix until ALL tests pass
+TDD flow:
+  Phase 1: Built-in test skill generates all test layers in one session
+  Phase 2: Developer implements the fix until ALL tests pass
 
 Usage:
     from skills.developer_skill import DeveloperSkill
 
-    skill = DeveloperSkill(linear_api_key, viewer_id, sentinel_skills_path="/app/sentinel-skills")
+    skill = DeveloperSkill(linear_api_key, viewer_id)
     result = skill.process(issue, team_key, worktree_path, repo_name)
-    # result.test_phases  — list of (skill_name, prompt) for sequential test generation
-    # result.impl_prompt  — final phase: implementation prompt
+    # result.test_prompt  — Test Agent prompt (single session, all layers)
+    # result.impl_prompt  — Dev Agent prompt (single session, implementation)
     # result.repos        — resolved repo entries
     # result.scope_type   — "normal" | "parent_with_subtasks" | "subtask"
 """
@@ -33,7 +33,7 @@ from skills.ticket_enricher import (
     parse_acceptance_criteria, extract_file_hints,
     PRIORITY_MAP,
 )
-from skills.sentinel_integration import SentinelTestGenerator
+from skills.test_prompt_builder import TestPromptBuilder
 from skills.pathfinder_parser import parse_pathfinder_comment, PathfinderAnalysis
 
 
@@ -60,7 +60,7 @@ class DeveloperResult:
     title: str
     scope_type: str  # "normal" | "parent_with_subtasks" | "subtask"
     repos: list[RepoEntry]
-    test_prompt: str   # Test Agent prompt (single session, all Sentinel skills)
+    test_prompt: str   # Test Agent prompt (single session, all test layers)
     impl_prompt: str   # Dev Agent prompt (single session, implementation)
     enriched_context: EnrichedContext
     stack_type: str = "backend"          # "backend" | "frontend" | "fullstack"
@@ -133,38 +133,19 @@ class DeveloperSkill:
     def __init__(
         self, api_key: str, viewer_id: str,
         github_org: str = "ruh-ai",
-        sentinel_skills_path: str = "",
     ) -> None:
         self.client = LinearClient(api_key)
         self.enricher = LinearEnricher(api_key)
         self.viewer_id = viewer_id
         self.github_org = github_org
-
-        # Sentinel is REQUIRED — test generation must always run
-        if sentinel_skills_path and os.path.isdir(sentinel_skills_path):
-            self.sentinel = SentinelTestGenerator(sentinel_skills_path)
-        else:
-            self.sentinel = None
-
-    @property
-    def sentinel_available(self) -> bool:
-        return self.sentinel is not None and self.sentinel.available
+        self.test_builder = TestPromptBuilder()
 
     def process(
         self, issue: dict[str, Any], team_key: str, worktree_path: str, repo_name: str
     ) -> DeveloperResult:
         """
-        Main entry point. Resolves scope, repos, and builds sequential test phases + implementation prompt.
-
-        Raises RuntimeError if Sentinel skills are not available.
+        Main entry point. Resolves scope, repos, and builds test + implementation prompts.
         """
-        # Sentinel is mandatory — fail early if not available
-        if not self.sentinel_available:
-            raise RuntimeError(
-                "Sentinel Guardian skills not found. "
-                "Test generation is required before implementation. "
-                "Ensure SENTINEL_SKILLS_PATH is set and skills are mounted."
-            )
 
         identifier = issue["identifier"]
         issue_id = issue["id"]
@@ -193,16 +174,10 @@ class DeveloperSkill:
         )
 
         # Step 5: Detect stack and build Test Agent prompt (scoped to ticket changes)
-        stack_type = self.sentinel.detect_stack(worktree_path)
-        test_prompt = self.sentinel.build_single_test_prompt(
+        stack_type = self.test_builder.detect_stack(worktree_path)
+        test_prompt = self.test_builder.build_test_prompt(
             enriched, worktree_path, repo_name, pathfinder=pathfinder,
         )
-
-        if not test_prompt:
-            raise RuntimeError(
-                f"No Sentinel test skills could be loaded for stack '{stack_type}'. "
-                "Check that SKILL.md files exist in the Sentinel skills directory."
-            )
 
         # Step 6: Build Dev Agent prompt (with Pathfinder context)
         impl_prompt = self._build_prompt(

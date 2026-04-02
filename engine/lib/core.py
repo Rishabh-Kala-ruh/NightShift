@@ -22,7 +22,7 @@ from typing import Any
 from lib.config import (
     LINEAR_API_KEY, GITHUB_ORG, TARGET_BRANCH, LOGS_DIR,
     CLAUDE_CMD, REPOS_DIR, REPO_MAP, PROCESSING_LABEL, DONE_LABEL,
-    MAX_CONCURRENT_TICKETS, MAX_CONCURRENT_REPOS, SENTINEL_SKILLS_PATH,
+    MAX_CONCURRENT_TICKETS, MAX_CONCURRENT_REPOS,
 )
 from lib.linear_client import LinearClient
 from skills.developer_skill import DeveloperSkill, DeveloperResult
@@ -778,18 +778,9 @@ def process_tickets() -> None:
         me = linear.get_viewer()
         log(f'Authenticated as: {me["name"]} ({me["email"]})')
 
-        # Initialize developer skill with viewer ID and Sentinel path
-        dev_skill = DeveloperSkill(
-            LINEAR_API_KEY, me["id"], GITHUB_ORG,
-            sentinel_skills_path=SENTINEL_SKILLS_PATH,
-        )
-        if not dev_skill.sentinel_available:
-            log("ERROR: Sentinel Guardian skills not found! Tickets will NOT be processed.")
-            log(f"  Expected path: {SENTINEL_SKILLS_PATH}")
-            log("  Ensure skills are mounted in Docker or exist at the configured path.")
-        else:
-            available_skills = dev_skill.sentinel.get_available_skills()
-            log(f"Sentinel Guardian: enabled ({len(available_skills)} skills available)")
+        # Initialize developer skill with viewer ID
+        dev_skill = DeveloperSkill(LINEAR_API_KEY, me["id"], GITHUB_ORG)
+        log("Test generation: built-in skill loaded")
 
         teams = linear.get_teams()
 

@@ -1,6 +1,7 @@
 ---
 name: status
 description: Show NightShift container status and recent logs
+tools: ["Bash", "Read"]
 ---
 
 # /status

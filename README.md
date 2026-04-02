@@ -2,7 +2,7 @@
 
 > Autonomous development agent that picks up tickets, writes tests, implements fixes, and ships PRs — while you sleep.
 
-NightShift processes Linear tickets end-to-end using Test-Driven Development with Sentinel Guardian test methodology. It runs inside Docker, polls Linear for eligible tickets, and produces ready-to-review pull requests.
+NightShift processes Linear tickets end-to-end using Test-Driven Development with a built-in multi-layer test methodology. It runs inside Docker, polls Linear for eligible tickets, and produces ready-to-review pull requests.
 
 ---
 
@@ -18,7 +18,7 @@ NightShift processes Linear tickets end-to-end using Test-Driven Development wit
                              Moves to "Ready for Dev"  --->  Picks up ticket
                                                              Filters repos (LLM)
                                                              Decomposes if L/XL (*)
-                                                             Writes tests (Sentinel)
+                                                             Writes tests (built-in)
                                                              Implements fix (TDD)
                                                              Creates PR with summary
                                                              Moves to "Code Review"
@@ -149,22 +149,21 @@ For each repo (parallel, up to MAX_CONCURRENT_REPOS workers):
   |     Fullstack: both signals present
   |     (also checks package.json deps: react, next, vue, angular, svelte, nuxt)
   |
-  |-- Load Sentinel Guardian skills for detected stack:
-  |     Backend (9):   test-setup, unit-tests, integration-tests, contract-tests,
-  |                    security-tests, resilience-tests, smoke-tests, e2e-api-tests, test-review
-  |     Frontend (4):  test-setup, unit-tests, e2e-browser-tests, test-review
-  |     Fullstack (10): all backend + e2e-browser-tests
+  |-- Select test layers for detected stack:
+  |     Backend (6):   unit, integration, contract, security, resilience, e2e-api
+  |     Frontend (2):  unit, e2e-browser
+  |     Fullstack (7): all backend + e2e-browser
   |
-  |-- Build single test prompt (all skills concatenated):
+  |-- Build single test prompt:
   |     |-- test-agent.md definition
   |     |-- Ticket context (description, criteria, Pathfinder, comments, hints)
-  |     |-- All applicable Sentinel skill instructions
+  |     |-- Built-in test-generator skill instructions
   |     '-- Critical rules (tests only, 1 per criterion, follow patterns)
   |
   '-- Spawn Claude Code session:
         |-- Reads the codebase and existing test patterns
         |-- Writes tests covering: main behavior, each AC, edge cases
-        |-- Commits: test(TICKET-ID): add tests for <title>
+        |-- Commits: TICKET-ID Add tests for <title>
         '-- Max 30 turns, 15-minute timeout
 ```
 
@@ -287,7 +286,7 @@ After all repos complete:
 |              |                       |                            |
 |              |  +------------------+ |                            |
 |              |  |   TEST AGENT     | |   Max 30 turns            |
-|              |  |   (Sentinel)     | |   15 min timeout          |
+|              |  |   (built-in)     | |   15 min timeout          |
 |              |  +--------+---------+ |                            |
 |              |           |           |                            |
 |              |  +--------v---------+ |                            |
@@ -382,13 +381,13 @@ Intelligence layer between ticket fetching and Claude Code:
 - Builds repo-scoped prompts for Test Agent and Dev Agent
 - Enriches context with sub-issues, relations, acceptance criteria
 
-### Sentinel Integration (`engine/skills/sentinel_integration.py`)
-Loads Sentinel Guardian test skills based on detected stack:
-- **Backend:** 9 skills (test-setup, unit, integration, contract, security, resilience, smoke, e2e-api, test-review)
-- **Frontend:** 4 skills (test-setup, unit, e2e-browser, test-review)
-- **Fullstack:** 10 skills (all backend + e2e-browser)
-- Only loads skills that exist on disk, silently skips missing ones
-- Concatenates all applicable skills into a single test prompt
+### Test Prompt Builder (`engine/skills/test_prompt_builder.py`)
+Builds test prompts using the built-in test-generator skill:
+- **Backend:** 6 layers (unit, integration, contract, security, resilience, e2e-api)
+- **Frontend:** 2 layers (unit, e2e-browser)
+- **Fullstack:** 7 layers (all backend + e2e-browser)
+- Smart layer selection: only includes layers relevant to code changes (keyword triggers)
+- No external dependency — reads from `skills/test-generator/SKILL.md`
 
 ### Ticket Enricher (`engine/skills/ticket_enricher.py`)
 Deep context extraction from Linear (7 parallel API calls):
@@ -473,7 +472,6 @@ The container runs `engine/main.py` by default, which polls every `POLL_INTERVAL
 | `REPOS_DIR` | Where repos are cloned | `./repos` |
 | `LOGS_DIR` | Log file directory | `./logs` |
 | `REPO_MAP` | JSON map of repo name to local path | `{}` |
-| `SENTINEL_SKILLS_PATH` | Sentinel Guardian skills directory | Auto-detected |
 
 ---
 
@@ -489,7 +487,6 @@ The container runs `engine/main.py` by default, which polls every `POLL_INTERVAL
 - `claude-data` --- Claude Code config (`/root/.claude`)
 - `gh-data` --- GitHub CLI auth (`/root/.config/gh`)
 - SSH key mounted read-only for git operations
-- Sentinel skills mounted read-only at `/app/sentinel-skills`
 
 **Git identity:** `NightShift Bot <nightshift@ruh-ai.com>`
 
@@ -534,7 +531,7 @@ NightShift/
 |   |   |-- ticket_enricher.py       # Deep ticket context (7 parallel API calls)
 |   |   |-- developer_skill.py       # Scope resolution + prompt building
 |   |   |-- task_decomposer.py       # L/XL task decomposition into subtasks
-|   |   |-- sentinel_integration.py  # Sentinel skill loading + stack detection
+|   |   |-- test_prompt_builder.py   # Test prompt building + stack detection
 |   |   |-- pathfinder_parser.py     # Pathfinder comment parser
 |   |   '-- repo_filter.py           # LLM-based repo filtering
 |   |-- main.py              # Continuous loop mode

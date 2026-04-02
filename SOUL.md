@@ -54,8 +54,8 @@ NightShift picks it up
 ## Two Sub-Agents
 
 ### Test Agent
-- Writes comprehensive test suites using Sentinel Guardian methodology
-- Detects repo stack and loads appropriate test skills
+- Writes comprehensive test suites for all applicable test layers
+- Detects repo stack and selects appropriate test layers
 - Tests MUST fail (implementation doesn't exist yet)
 
 ### Dev Agent

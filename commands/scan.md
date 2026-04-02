@@ -1,6 +1,7 @@
 ---
 name: scan
 description: Run the full NightShift pipeline — scan Linear for eligible tickets and process them
+tools: ["Bash", "Read", "Write", "Edit", "Grep", "Glob"]
 ---
 
 # /scan
@@ -11,12 +12,11 @@ Run the full NightShift pipeline autonomously.
 
 Execute the complete pipeline described in CLAUDE.md:
 
-1. **COLLECT** — Authenticate with Linear, fetch eligible tickets (Ready for Development, assigned to you), sort by priority
-2. **PREPARE** — For each ticket: fetch comments, parse Pathfinder analysis, detect repos, clone/update repos, create worktrees
-3. **EXECUTE** — For each ticket:
+1. **COLLECT** — Authenticate with Linear, fetch eligible tickets (Ready for Development, assigned to you), sort by priority. If a ticket has subtasks in "Ready for Development", process those subtasks instead of the parent.
+2. **PREPARE** — For each ticket/subtask: fetch comments, parse Pathfinder analysis, detect repos, clone/update repos, create worktrees
+3. **EXECUTE** — For each ticket/subtask:
    - Transition to "In Development"
-   - If complexity is L/XL and no children → decompose into subtasks first
-   - Test Agent: write tests, commit
+   - Test Agent: write tests for all applicable layers, commit
    - Dev Agent: implement fix until tests pass, commit
    - Push branch, create PR via `gh`
    - **Post comment on Linear ticket** with PR link, commits, files changed
