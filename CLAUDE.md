@@ -231,7 +231,7 @@ In the worktree directory, write comprehensive tests:
 - Write tests covering: main behavior, each acceptance criterion, edge cases
 - Follow Sentinel Guardian methodology if skills are available
 - Run tests — they should FAIL (implementation doesn't exist yet)
-- Commit: `test(TICKET-ID): add tests for <title>`
+- Commit: `TICKET-ID Add tests for <title>`
 
 #### Step 3: Dev Agent
 In the same worktree:
@@ -244,7 +244,7 @@ In the same worktree:
 - **NEVER edit test files**
 - Commit:
   ```
-  TICKET-ID: <title>
+  TICKET-ID <title>
 
   <2-3 sentence summary>
 
@@ -259,7 +259,7 @@ git push origin "$BRANCH"
 gh pr create \
   --base "${TARGET_BRANCH:-dev}" \
   --head "$BRANCH" \
-  --title "$TICKET_ID: $TITLE" \
+  --title "$TICKET_ID $TITLE" \
   --body "## Summary
 - <commit messages>
 
@@ -359,6 +359,30 @@ When a ticket has Pathfinder complexity **L** or **XL** and has **no existing ch
 | Sub-task | Only implement THIS sub-task's scope, read parent for context |
 | L/XL complexity, no children | Decompose first, then process subtasks |
 
+## Commit Message Convention
+
+**All commits MUST start with a ticket ID, conventional commit type, or release tag.** Enforced by git hooks in target repos.
+
+### Valid formats
+
+| Format | Example |
+|---|---|
+| Ticket ID | `TT-255 Fix auth token validation` |
+| Conventional (type) | `feat: add login page` |
+| Conventional (scope) | `test(TT-255): add auth tests` |
+| Conventional (no colon) | `fix bug in auth` |
+| WIP | `WIP` |
+| QA release | `[QA Release] March batch` |
+| Prod release | `[Prod Release] v1.2` |
+
+**Allowed prefixes:** `feat`, `fix`, `test`, `chore`, `docs`, `style`, `refactor`, `perf`, `ci`, `build`, `revert`, `WIP`, `TICKET-ID`, `[QA Release]`, `[Prod Release]`
+
+**Invalid** (will be rejected):
+- `updates` — not a recognized prefix
+- `random message` — no ticket ID or conventional type
+
+Merge and revert commits are exempt.
+
 ## Hard Rules
 
 1. **TDD is mandatory.** Write tests FIRST, then implement. No exceptions.
@@ -367,7 +391,7 @@ When a ticket has Pathfinder complexity **L** or **XL** and has **no existing ch
 4. **Never modify test files during implementation.** Tests are the contract.
 5. **Always comment on the ticket.** PR link, commits, files changed.
 6. **Always transition ticket state.** "In Development" when starting, "Code Review" when done.
-7. **Clean commits.** Test commit separate from implementation commit.
+7. **Clean commits.** Test commit separate from implementation commit. Format: `TICKET-ID Message`.
 8. **Scope boundaries are sacred.** Never implement outside the ticket's scope.
 
 ## Error Handling
